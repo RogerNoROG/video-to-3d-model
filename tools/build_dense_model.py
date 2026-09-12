@@ -14,17 +14,32 @@ dense/ 与 fused.ply。要处理第二个模型必须另开一份工作区，否
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from app.main import settings, subprocess_env  # noqa: E402
 
 POLL_SECONDS = 3.0
+
+
+def write_state(path: Path, **fields: object) -> None:
+    """写进度状态文件，供 tools/dense_status.py 与 ./start.sh status 读取。"""
+    payload: dict[str, object] = {}
+    if path.exists():
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            payload = {}
+    payload.update(fields)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def run(command: list[str], cwd: Path, log_path: Path, label: str) -> None:
@@ -82,6 +97,7 @@ def main() -> None:
     dense = root / f"dense_{args.model}"
     fused = root / f"fused_{args.model}.ply"
     log_path = Path("logs") / f"dense_model{args.model}.log"
+    state_path = Path("logs") / f"dense_model{args.model}.json"
 
     if not model.exists():
         raise SystemExit(f"找不到稀疏模型 {model}")
@@ -123,6 +139,19 @@ def main() -> None:
         views = len([l for l in config.read_text(encoding="utf-8").splitlines() if l.strip()]) // 2
     passes = 2 if geom else 1
     total = max(views, 1) * passes
+    Path(f"logs/dense_model{args.model}.pid").write_text(str(os.getpid()), encoding="utf-8")
+    write_state(
+        state_path,
+        job=args.job,
+        model=args.model,
+        views=views,
+        passes=passes,
+        total=total,
+        max_image_size=max_size,
+        geom_consistency=geom,
+        started_at=datetime.now().isoformat(timespec="seconds"),
+        finished_at=None,
+    )
     print(f"\n[2/3] patch_match_stereo（{views} 视角 x {passes} 遍 = {total:,} 个产物）", flush=True)
 
     command = [
@@ -160,6 +189,7 @@ def main() -> None:
     )
 
     size = fused.stat().st_size if fused.exists() else 0
+    write_state(state_path, finished_at=datetime.now().isoformat(timespec="seconds"), size_bytes=size)
     print(f"\n完成：{fused}  {size / 1024 / 1024:.0f} MB")
     print(f"日志：{log_path}")
 

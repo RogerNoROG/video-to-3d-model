@@ -12,9 +12,11 @@
 #
 # 用法：
 #   ./start.sh            # 启动（若已在跑则跳过）
-#   ./start.sh status     # 查看前后台是否仍在运行 + 任务进度
-#   ./start.sh restart    # 重启并自动续跑未完成的稠密阶段
-#   ./start.sh stop       # 停止
+#   ./start.sh status     # 查看前后台是否仍在运行 + 任务进度 + 独立稠密构建进度
+#   ./start.sh watch      # 每 30 秒刷新一次 status（Ctrl-C 退出，不影响后台）
+#   ./start.sh restart    # 重启后端并自动续跑未完成的稠密阶段
+#   ./start.sh stop       # 停止后端与前端（不会动独立稠密构建）
+#   ./start.sh stop-dense # 显式停止独立稠密构建（产物保留，可断点续跑）
 set -uo pipefail
 
 cd "$(dirname "$0")"
@@ -42,6 +44,40 @@ alive() {  # alive <pidfile> -> 0 存活 / 1 不存在或已死
   [ -f "$pidfile" ] || return 1
   local pid; pid="$(cat "$pidfile")"
   [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+}
+
+# 独立稠密构建（tools/build_dense_model.py）跑在各自的会话里，与后端无关。
+# 它们各自有一个 logs/dense_model*.pid，且会话号(SID)等于该 python 进程的 PID。
+# 收集这些会话号，用于在 stop 时**避免误杀**它们正在跑的子 colmap。
+dense_build_pids() {
+  local p
+  for f in logs/dense_model*.pid; do
+    [ -f "$f" ] || continue
+    p="$(cat "$f" 2>/dev/null)"
+    [ -n "$p" ] && kill -0 "$p" 2>/dev/null && echo "$p"
+  done
+}
+
+stop_colmap_except_dense() {
+  local protected; protected="$(dense_build_pids)"
+  local killed=0 skipped=0 pid sid keep
+  for pid in $(pgrep -f 'colmap' 2>/dev/null); do
+    sid="$(ps -o sid= -p "$pid" 2>/dev/null | tr -d ' ')"
+    keep=0
+    for p in $protected; do [ "$sid" = "$p" ] && keep=1 && break; done
+    if [ "$keep" = 1 ]; then
+      skipped=$((skipped + 1))
+      continue
+    fi
+    kill "$pid" 2>/dev/null && killed=$((killed + 1))
+  done
+  if [ "$killed" -gt 0 ] || [ "$skipped" -gt 0 ]; then
+    for _ in $(seq 1 40); do
+      pgrep -f 'colmap patch_match_stereo' > /dev/null || break
+      sleep 0.5
+    done
+    echo "colmap：已清理 $killed 个遗留进程；保留 $skipped 个属于独立稠密构建的进程"
+  fi
 }
 
 start() {
@@ -80,17 +116,27 @@ stop() {
   fi
   # 关键：uvicorn 优雅退出**不会**杀死 BackgroundTasks 起的子进程，colmap 会变成孤儿
   # 继续跑，与下一次启动的 colmap 抢 GPU、抢同一批输出文件。必须显式清掉。
-  if pgrep -f 'colmap' > /dev/null; then
-    pkill -f 'colmap' 2>/dev/null || true
-    for _ in $(seq 1 40); do
-      pgrep -f 'colmap patch_match_stereo' > /dev/null || break
-      sleep 0.5
-    done
-    pgrep -f 'colmap patch_match_stereo' > /dev/null && pkill -9 -f 'colmap patch_match_stereo' 2>/dev/null || true
-    echo "已清理遗留的 colmap 进程（当前视角会重跑，已完成的视角不受影响）"
-  fi
+  # 但要避开 tools/build_dense_model.py 起的 colmap —— 那是另开的长期任务，
+  # 一刀切 pkill 会把几小时的稠密重建打掉。
+  stop_colmap_except_dense
   rm -f "$BACKEND_PID" "$FRONTEND_PID"
   echo "已停止。产物保留在 storage/<job_id>/，重启后用 ./start.sh restart 自动续跑。"
+}
+
+stop_dense() {
+  local p found=0
+  for f in logs/dense_model*.pid; do
+    [ -f "$f" ] || continue
+    p="$(cat "$f" 2>/dev/null)"
+    [ -n "$p" ] || continue
+    if kill -0 "$p" 2>/dev/null; then
+      kill "$p" 2>/dev/null || true
+      echo "已停止稠密构建 pid $p ($(basename "$f" .pid))"
+      found=1
+    fi
+  done
+  [ "$found" = 0 ] && echo "没有正在运行的独立稠密构建"
+  echo "产物保留在 storage/<job_id>/dense_*/ 与 fused_*.ply，重新运行同一命令可断点续跑。"
 }
 
 resume_unfinished() {
@@ -145,14 +191,31 @@ if not jobs:
 for j in jobs[:3]:
     print("任务    : %-10s %3d%%  %s  (%s)" % (
         j.get("status", ""), j.get("progress", 0), j.get("stage", "")[:58], j.get("id", "")[:8]))'
+
+  # 独立稠密构建（tools/build_dense_model.py）不属于后端任务，得单独报
+  if [ -x ./.venv/bin/python ]; then
+    ./.venv/bin/python tools/dense_status.py 2>/dev/null || true
+  else
+    python3 tools/dense_status.py 2>/dev/null || true
+  fi
 }
 
 case "${1:-start}" in
   start) start ;;
   stop) stop ;;
   status) status ;;
+  watch)
+    while true; do
+      clear 2>/dev/null || printf '\033[2J\033[H'
+      date '+%Y-%m-%d %H:%M:%S  （每 30 秒刷新，Ctrl-C 退出，不影响后台）'
+      echo
+      status
+      sleep 30
+    done
+    ;;
   restart) stop; start; resume_unfinished ;;
   resume) resume_unfinished ;;
-  *) echo "用法: $0 [start|stop|status|restart|resume]" >&2; exit 2 ;;
+  stop-dense) stop_dense ;;
+  *) echo "用法: $0 [start|stop|status|watch|restart|resume|stop-dense]" >&2; exit 2 ;;
 esac
 

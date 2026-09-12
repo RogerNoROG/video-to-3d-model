@@ -120,17 +120,36 @@ ps -o pid,ppid,pgid,sid,tty -p "$(cat logs/backend.pid)"
 
 ```bash
 cd ~/video-to-3d-model && ./start.sh status
+./start.sh watch      # 每 30 秒自动刷新（Ctrl-C 退出，不影响后台）
 ```
 
 输出示例：
 
 ```
-后端    : 运行中 (pid 5389)  {"status":"ok"}
-  会话  : SID=5389  TT=?  (TT 为空 = 已脱离终端)
-前端    : 运行中 (pid 5842)  http://localhost:5500/video_upload.html
-colmap  : 运行中 (pid 5545)
-任务    : processing  83%  COLMAP 生成稠密点云（光度+几何一致性两遍）（743/1334）  (e7f9f9e5)
+后端    : 运行中 (pid 323312)  {"status":"ok"}
+  会话  : SID=323312  TT=?  (TT 为空 = 已脱离终端)
+前端    : 运行中 (pid 323314)  http://localhost:5500/video_upload.html
+colmap  : 运行中 (pid 445961)
+任务    : completed  100%  处理完成（注册 667/1335 张图像）  (e7f9f9e5)
+模型1    运行中 (pid 445810)   第1遍/共2遍  产物 69/1,326 (5.2%)   2.9/分钟   剩余 427 分钟 (约 05:22)
 ```
+
+最后一行是**独立稠密构建**（`tools/build_dense_model.py`，例如为第二个稀疏模型建稠密点云）。
+它跑在单独的会话里、不属于后端任务，所以由 `tools/dense_status.py` 单独汇报。
+进度直接数 `depth_maps` 里的产物文件，速率用最早/最新产物的 mtime 推算 ——
+不解析日志，中途重启也能给出正确速率。
+
+`./start.sh` 全部子命令：
+
+| 命令 | 作用 |
+| --- | --- |
+| `start` | 启动后端 + 前端（已在跑则跳过） |
+| `status` | 前后台状态 + 任务进度 + 独立稠密构建进度 |
+| `watch` | 每 30 秒刷新 status |
+| `restart` | 重启后端并自动续跑未完成任务 |
+| `resume` | 只提交续跑，不重启服务 |
+| `stop` | 停止后端与前端，**保留**独立稠密构建 |
+| `stop-dense` | 显式停止独立稠密构建（产物保留，可断点续跑） |
 
 不想用脚本的话，原始命令：
 
@@ -141,7 +160,7 @@ curl -s http://127.0.0.1:8000/health             # 后端活着吗
 curl -s http://127.0.0.1:8000/api/v1/jobs | python3 -m json.tool | head -n 20
 ```
 
-`./start.sh status` 会在检测到**多个 colmap 同时运行**时告警——那意味着它们在抢 GPU 和同一批输出文件，必须 `./start.sh restart` 清理。
+`./start.sh status` 会在检测到**多个 colmap 同时运行**时告警——那意味着它们在抢 GPU 和同一批输出文件。
 
 ### 续跑
 
