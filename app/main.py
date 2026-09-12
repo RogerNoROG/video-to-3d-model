@@ -64,6 +64,13 @@ class Settings(BaseSettings):
     poisson_remove_planes: int = Field(default=0, ge=0, le=4)
     # 平面判定的距离阈值 = 点间距 × 该系数
     poisson_plane_distance_scale: float = Field(default=4.0, gt=0.0)
+    # 只保留「暖色」被摄物，剔除白/灰的支撑面与背景。-1 = 关闭（默认）。
+    # 判据是 R-B：棕木材/陶土 R 明显大于 B，白桌面/水泥/天空 R≈G≈B。
+    # 0 = Otsu 自动（注意：实测会偏大、削到物体暗部，需目视确认）；
+    # >0 = 显式阈值。阈值是**场景相关**的，本项目实测 0.08 最佳。
+    # 这是唯一可靠的分离手段：几何上物块与桌面完全连通、密度上桌面更密、
+    # RANSAC 平面会命中物体自己的面
+    mesh_object_warmth: float = Field(default=-1.0, ge=-1.0, le=1.0)
     # Poisson 深度的上限（内存约束）。八叉树叶节点数约为 8^depth，每 +1 内存约 ×8，
     # 24GB 内存下 9 已是上限（实测 9 在 1854 万点上会耗尽内存）
     poisson_max_depth: int = Field(default=9, ge=5, le=12)
@@ -772,6 +779,7 @@ def mesh_and_export(job_id: str, root: Path, point_cloud_path: Path) -> None:
             density_quantile=settings.mesh_density_quantile,
             plane_max=settings.poisson_remove_planes,
             plane_distance_scale=settings.poisson_plane_distance_scale,
+            object_warmth=settings.mesh_object_warmth,
         )
 
 

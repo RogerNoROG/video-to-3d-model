@@ -178,6 +178,88 @@ def keep_significant_components(mesh: o3d.geometry.TriangleMesh, min_ratio: floa
     return mesh
 
 
+def otsu_threshold(values: np.ndarray, bins: int = 256) -> float:
+    """一维 Otsu 阈值：使类间方差最大的分割点。
+
+    用来把「暖色（棕色木块等被摄物）」与「中性色（白桌面、背景）」分开，
+    不需要场景相关的硬编码阈值。
+    """
+    values = values[np.isfinite(values)]
+    if values.size == 0:
+        return 0.0
+    lo, hi = float(values.min()), float(values.max())
+    if hi - lo < 1e-6:
+        return hi
+    histogram, edges = np.histogram(values, bins=bins, range=(lo, hi))
+    histogram = histogram.astype(np.float64)
+    centers = (edges[:-1] + edges[1:]) / 2
+    weighted = histogram * centers
+
+    weight_back = np.cumsum(histogram)
+    weight_fore = histogram.sum() - weight_back
+    valid = (weight_back > 0) & (weight_fore > 0)
+    if not valid.any():
+        return lo
+
+    sum_back = np.cumsum(weighted)
+    sum_fore = weighted.sum() - sum_back
+    mean_back = sum_back / np.maximum(weight_back, 1)
+    mean_fore = sum_fore / np.maximum(weight_fore, 1)
+
+    between = weight_back * weight_fore * (mean_back - mean_fore) ** 2
+    between[~valid] = -1.0
+    return float(centers[int(np.argmax(between))])
+
+
+def keep_object_by_color(
+    cloud: o3d.geometry.PointCloud,
+    min_warmth: float = 0.0,
+    min_keep_ratio: float = 0.1,
+) -> o3d.geometry.PointCloud:
+    """只保留「暖色」的被摄物点，剔除白/灰的支撑面与背景。
+
+    判据是 R-B（暖色程度）：棕木材、陶土等 R 明显大于 B，而白桌面、水泥墙、
+    天空的 R≈G≈B。这是本项目里**唯一**可靠区分物块与桌面的手段：
+
+    - 几何上两者完全连通（DBSCAN 对整片点云只给出一个簇）
+    - 密度上桌面反而更密（实测 0.00088 vs 物块 0.00115）
+    - RANSAC 平面会命中物块自己的一个大面（179 万内点 ≈ 物块点的 1/6）
+
+    ⚠️ 阈值是**场景相关**的，无法可靠自动推导，实测数据：
+
+    - Otsu 自动值 0.140 偏大 —— 物块表面有阴影和高光，颜色方差大，
+      阈值取高就会削掉暗部（包围盒从 2.11 缩到 1.65，切掉约 35%）
+    - 用「中性色 ∩ 落在支撑平面上」的点（594,318 个，确定属于桌面）反推阈值同样失败：
+      该集合 warmth 均值 0.051、标准差 0.036，桌面**阴影区**本身偏暖，
+      与物块暗部颜色重叠，推得 0.14~0.18 一样切物块
+    - 也不要在颜色之外再加「远离平面就保留」的几何保护：中性色点里远离平面的部分是
+      窗外景物，加了保护等于把背景又救回来，包围盒始终不降
+
+    本场景（白桌面 + 棕木块）实测 **0.08** 效果最好：桌面薄片与散点全部消失，
+    木块完整（尺寸 2.11 x 2.19 x 1.87，物体真实约 2.0 x 2.19 x 1.82）。
+
+    ``min_warmth``：>0 用给定阈值；0 用 Otsu 自动（可能偏大，需目视确认）。
+    """
+    if not cloud.has_colors() or len(cloud.points) < 100:
+        return cloud
+    colors = np.asarray(cloud.colors)
+    warmth = colors[:, 0] - colors[:, 2]
+    threshold = min_warmth if min_warmth > 0 else otsu_threshold(warmth)
+    keep = np.flatnonzero(warmth >= threshold)
+    if len(keep) < len(cloud.points) * min_keep_ratio or len(keep) == len(cloud.points):
+        _log(f"颜色阈值 {threshold:.3f} 保留 {len(keep):,}/{len(cloud.points):,} 点，比例异常，跳过提取")
+        return cloud
+    selected = cloud.select_by_index(keep)
+    _log(
+        f"按颜色提取被摄物（R-B >= {threshold:.3f}"
+        f"{'，Otsu 自动（偏大，建议目视确认，必要时显式指定）' if min_warmth <= 0 else ''}）："
+        f"{len(cloud.points):,} -> {len(keep):,} 点，"
+        f"尺寸 {np.round(cloud.get_max_bound() - cloud.get_min_bound(), 3)} -> "
+        f"{np.round(selected.get_max_bound() - selected.get_min_bound(), 3)}"
+    )
+    return selected
+
+
 def remove_dominant_planes(
     cloud: o3d.geometry.PointCloud,
     distance_threshold: float,
@@ -345,6 +427,7 @@ def point_cloud_to_glb(
     density_quantile: float = 0.02,
     plane_max: int = 0,
     plane_distance_scale: float = 4.0,
+    object_warmth: float = -1.0,
 ) -> None:
     """Convert a COLMAP PLY point cloud into a triangle mesh GLB.
 
@@ -369,6 +452,8 @@ def point_cloud_to_glb(
     cloud = remove_sparse_outliers(cloud, sor_neighbors, sor_std_ratio)
     if sor_std_ratio > 0:
         _log(f"离群点清理耗时 {time.monotonic() - mark:.1f}s")
+    if object_warmth >= 0:
+        cloud = keep_object_by_color(cloud, object_warmth)
     spacing = estimate_point_spacing(np.asarray(cloud.points))
     _log(f"估计点间距 {spacing:.4f}")
     if plane_max > 0:
