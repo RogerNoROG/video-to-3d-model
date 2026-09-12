@@ -1,0 +1,791 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>本地文件拖放上传 + 视频结果预览</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: system-ui, sans-serif;
+        }
+        body {
+            padding: 40px 20px;
+            background-color: #f4f7fa;
+        }
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+        }
+        h2 {
+            text-align: center;
+            margin-bottom: 30px;
+            color: #222;
+        }
+        /* 拖放区域样式 */
+        .drop-box {
+            border: 3px dashed #99b3d8;
+            border-radius: 16px;
+            padding: 60px 20px;
+            text-align: center;
+            background: #ffffff;
+            transition: all 0.25s ease;
+            cursor: pointer;
+        }
+        .drop-box.active {
+            border-color: #2563eb;
+            background-color: #eff6ff;
+        }
+        .drop-box p {
+            font-size: 18px;
+            color: #555;
+        }
+        .drop-box small {
+            color: #888;
+            margin-top:8px;
+            display:block;
+        }
+        #file-input {
+            display: none;
+        }
+        /* 文件列表 */
+        .file-list {
+            margin-top: 24px;
+            background: white;
+            border-radius:12px;
+            padding:16px;
+        }
+        .file-item {
+            padding:10px 0;
+            border-bottom:1px solid #eee;
+            display:flex;
+            align-items:center;
+            gap:12px;
+        }
+        .file-item:last-child{
+            border-bottom:none;
+        }
+        .preview-img{
+            width:60px;
+            height:60px;
+            object-fit:cover;
+            border-radius:6px;
+        }
+        /* ========== 【留给队友】视频处理结果预览容器 ========== */
+        .result-area{
+            margin-top:24px;
+            background:#fff;
+            border-radius:12px;
+            padding:20px;
+        }
+        .result-area h3{
+            margin-bottom:16px;
+            color:#222;
+        }
+        #video-preview{
+            max-width:100%;
+            max-height:450px;
+            display:block;
+            margin:10px 0;
+        }
+        .result-text{
+            background:#f7f8fa;
+            padding:12px;
+            border-radius:8px;
+            white-space:pre-wrap;
+            min-height:80px;
+        }
+        .job-summary{
+            display:grid;
+            grid-template-columns:repeat(3, minmax(0, 1fr));
+            gap:10px;
+            margin:16px 0;
+        }
+        .job-stat{
+            background:#f7f8fa;
+            border-radius:8px;
+            padding:10px 12px;
+            min-width:0;
+        }
+        .job-stat small{
+            display:block;
+            color:#777;
+            margin-bottom:4px;
+        }
+        .job-stat strong{
+            display:block;
+            overflow:hidden;
+            text-overflow:ellipsis;
+            white-space:nowrap;
+        }
+        .progress-track{
+            height:12px;
+            background:#e5e7eb;
+            border-radius:999px;
+            overflow:hidden;
+            margin:14px 0 6px;
+        }
+        .progress-bar{
+            height:100%;
+            width:0;
+            background:#2563eb;
+            transition:width .3s ease;
+        }
+        .progress-meta{
+            display:flex;
+            justify-content:space-between;
+            color:#555;
+            font-size:14px;
+        }
+        .stage-list{
+            list-style:none;
+            margin:18px 0 0;
+            padding:0;
+            display:grid;
+            gap:8px;
+        }
+        .stage-item{
+            display:flex;
+            align-items:flex-start;
+            gap:10px;
+            padding:9px 10px;
+            border-radius:8px;
+            background:#fafafa;
+            color:#777;
+        }
+        .stage-item.active{
+            background:#eff6ff;
+            color:#1d4ed8;
+        }
+        .stage-item.done{
+            color:#15803d;
+        }
+        .stage-item.failed{
+            background:#fef2f2;
+            color:#b91c1c;
+        }
+        .stage-icon{
+            width:22px;
+            flex:0 0 22px;
+            text-align:center;
+            font-weight:700;
+        }
+        .stage-copy strong,
+        .stage-copy small{
+            display:block;
+        }
+        .stage-copy small{
+            margin-top:3px;
+            color:inherit;
+            opacity:.75;
+        }
+        @media (max-width:640px){
+            .job-summary{grid-template-columns:1fr 1fr;}
+        }
+        .btn-group{
+            margin-top:16px;
+            display:flex;
+            gap:10px;
+            flex-wrap:wrap;
+        }
+        .result-link{
+            display:inline-block;
+            margin-top:16px;
+            color:#2563eb;
+            text-decoration:none;
+            font-weight:600;
+        }
+        .model-viewer-wrap{
+            display:none;
+            margin-top:18px;
+            height:460px;
+            border-radius:10px;
+            overflow:hidden;
+            background:#eef2f7;
+        }
+        model-viewer{
+            width:100%;
+            height:100%;
+            --poster-color:#eef2f7;
+        }
+        .history-area{
+            margin-top:24px;
+            background:#fff;
+            border-radius:12px;
+            padding:20px;
+        }
+        .history-area h3{
+            margin-bottom:12px;
+            color:#222;
+        }
+        .history-list{
+            display:grid;
+            gap:8px;
+        }
+        .history-item{
+            display:flex;
+            justify-content:space-between;
+            align-items:center;
+            gap:12px;
+            padding:10px 12px;
+            border:1px solid #e5e7eb;
+            border-radius:8px;
+            cursor:pointer;
+        }
+        .history-item:hover{
+            background:#f8fafc;
+        }
+        .history-main{
+            min-width:0;
+        }
+        .history-main strong,
+        .history-main small{
+            display:block;
+            overflow:hidden;
+            text-overflow:ellipsis;
+            white-space:nowrap;
+        }
+        .history-main small{
+            margin-top:4px;
+            color:#777;
+        }
+        .history-status{
+            flex:0 0 auto;
+            color:#2563eb;
+            font-size:14px;
+        }
+        .history-actions{
+            display:flex;
+            gap:6px;
+            flex:0 0 auto;
+        }
+        .history-actions button{
+            padding:5px 9px;
+            font-size:13px;
+        }
+        .history-actions .retry-button{
+            background:#15803d;
+        }
+        .history-actions .delete-button{
+            background:#b91c1c;
+        }
+        @media (max-width:640px){
+            .history-item{align-items:flex-start; flex-wrap:wrap;}
+            .history-actions{width:100%;}
+        }
+        button{
+            padding:8px 16px;
+            border:none;
+            border-radius:6px;
+            cursor:pointer;
+            background:#2563eb;
+            color:white;
+        }
+        button.clear{
+            background:#999;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h2>文件上传 + 视频处理结果预览</h2>
+        <div class="drop-box" id="dropBox">
+            <p>将文件拖放到此处，或者点击选择文件</p>
+            <small>文件仅保存在浏览器本地，提交后交给后端处理视频</small>
+            <input type="file" id="file-input" multiple>
+        </div>
+        <div class="file-list" id="fileList"></div>
+
+        <div class="history-area">
+            <h3>任务列表</h3>
+            <div class="history-list" id="historyList">正在读取后台任务...</div>
+        </div>
+
+        <!-- ===================== HTML 后端接入点 1：结果预览DOM区域 =====================
+        队友说明：
+        1. #video-preview 标签：用来渲染后端返回的视频
+        2. #resultText：用来放后端返回的日志、文本信息（处理进度、报错信息等）
+        -->
+        <div class="result-area">
+            <h3>处理结果预览区</h3>
+            <video id="video-preview" controls></video>
+            <div class="model-viewer-wrap" id="modelViewerWrap">
+                <model-viewer id="modelViewer" camera-controls auto-rotate shadow-intensity="1" exposure="1" environment-image="neutral" loading="lazy" alt="生成的三维模型"></model-viewer>
+            </div>
+            <div class="result-text" id="resultText">等待后端处理输出...</div>
+            <div class="job-summary">
+                <div class="job-stat"><small>任务 ID</small><strong id="jobId">-</strong></div>
+                <div class="job-stat"><small>输入文件</small><strong id="jobFile">-</strong></div>
+                <div class="job-stat"><small>已耗时</small><strong id="jobElapsed">-</strong></div>
+            </div>
+            <div class="progress-track"><div class="progress-bar" id="progressBar"></div></div>
+            <div class="progress-meta"><span id="progressStage">等待任务</span><strong id="progressPercent">0%</strong></div>
+            <ul class="stage-list" id="stageList">
+                <li class="stage-item" data-stage="quality"><span class="stage-icon">1</span><span class="stage-copy"><strong>检查视频与拍摄质量</strong><small>确认视频格式、清晰度和可用于重建的画面</small></span></li>
+                <li class="stage-item" data-stage="normalize"><span class="stage-icon">2</span><span class="stage-copy"><strong>统一转码为 1080p30</strong><small>降低 4K/60fps 输入的资源消耗并统一规格</small></span></li>
+                <li class="stage-item" data-stage="frames"><span class="stage-icon">3</span><span class="stage-copy"><strong>按 3 FPS 抽取关键帧</strong><small>从标准化视频生成适合摄影测量的图像序列</small></span></li>
+                <li class="stage-item" data-stage="features"><span class="stage-icon">4</span><span class="stage-copy"><strong>COLMAP 提取图像特征</strong><small>使用 GPU 识别每张图像中的可匹配特征</small></span></li>
+                <li class="stage-item" data-stage="matching"><span class="stage-icon">5</span><span class="stage-copy"><strong>匹配相邻帧</strong><small>寻找不同视角之间的共同特征点</small></span></li>
+                <li class="stage-item" data-stage="camera"><span class="stage-icon">6</span><span class="stage-copy"><strong>估计相机位姿</strong><small>计算拍摄相机的位置和朝向</small></span></li>
+                <li class="stage-item" data-stage="pointcloud"><span class="stage-icon">7</span><span class="stage-copy"><strong>生成稠密点云</strong><small>由多视角深度信息生成三维点云</small></span></li>
+                <li class="stage-item" data-stage="mesh"><span class="stage-icon">8</span><span class="stage-copy"><strong>重建网格并导出 GLB</strong><small>生成三角网格并输出可下载的模型文件</small></span></li>
+            </ul>
+            <a class="result-link" id="resultLink" hidden download="model.glb">下载 GLB 模型</a>
+            <div class="btn-group">
+                <button id="submitBtn">提交文件给后端处理</button>
+                <button class="clear" id="clearResultBtn">清空预览</button>
+                <button class="clear" id="clearFileBtn">清空文件列表</button>
+            </div>
+        </div>
+    </div>
+
+    <script type="module" src="https://unpkg.com/@google/model-viewer@4.1.0/dist/model-viewer.min.js"></script>
+
+    <script>
+        const dropBox = document.getElementById('dropBox');
+        const fileInput = document.getElementById('file-input');
+        const fileList = document.getElementById('fileList');
+        const videoPreview = document.getElementById('video-preview');
+        const modelViewerWrap = document.getElementById('modelViewerWrap');
+        const modelViewer = document.getElementById('modelViewer');
+        const resultText = document.getElementById('resultText');
+        const submitBtn = document.getElementById('submitBtn');
+        const clearResultBtn = document.getElementById('clearResultBtn');
+        const clearFileBtn = document.getElementById('clearFileBtn');
+        const resultLink = document.getElementById('resultLink');
+        const jobIdText = document.getElementById('jobId');
+        const jobFileText = document.getElementById('jobFile');
+        const jobElapsedText = document.getElementById('jobElapsed');
+        const progressBar = document.getElementById('progressBar');
+        const progressStage = document.getElementById('progressStage');
+        const progressPercent = document.getElementById('progressPercent');
+        const stageItems = [...document.querySelectorAll('.stage-item')];
+        const historyList = document.getElementById('historyList');
+
+        const API_BASE = "http://127.0.0.1:8000";
+        const POLL_INTERVAL_MS = 1000;
+        let pollingTimer = null;
+        let pollingJobId = null;
+        let pollingToken = 0;
+        let jobStartedAt = null;
+        let activeJobId = null;
+
+        const stageOrder = [
+            ['quality', '检查视频与拍摄质量'],
+            ['normalize', '转码为 1080p30'],
+            ['frames', '抽取关键帧'],
+            ['features', '提取图像特征'],
+            ['matching', '匹配相邻帧'],
+            ['camera', '估计相机位姿'],
+            ['pointcloud', '点云'],
+            ['mesh', '导出 GLB']
+        ];
+
+        let selectedFiles = []; // 全局变量，保存选中的文件，提交时传给后端
+
+        loadJobs();
+
+        // 格式化文件大小
+        function formatSize(bytes) {
+            if (bytes === 0) return '0 B';
+            const k = 1024;
+            const sizes = ['B','KB','MB','GB'];
+            const i = Math.floor(Math.log(bytes)/Math.log(k));
+            return (bytes / Math.pow(k,i)).toFixed(2) + ' ' + sizes[i];
+        }
+
+        // 处理文件
+        function handleFiles(files) {
+            selectedFiles = Array.from(files); // 保存文件到全局
+            fileList.innerHTML = "";
+            for(let file of selectedFiles){
+                const div = document.createElement('div');
+                div.className = "file-item";
+                let html = `<div><strong>${file.name}</strong><br><span>${formatSize(file.size)}</span></div>`;
+
+                // 图片预览
+                if(file.type.startsWith('image/')){
+                    const reader = new FileReader();
+                    reader.onload = function(e){
+                        div.insertAdjacentHTML('afterbegin',`<img class="preview-img" src="${e.target.result}">`);
+                    }
+                    reader.readAsDataURL(file);
+                }
+                div.innerHTML = html;
+                fileList.appendChild(div);
+            }
+        }
+
+        // 点击打开文件选择
+        dropBox.addEventListener('click', ()=>{
+            fileInput.click();
+        })
+        fileInput.addEventListener('change', (e)=>{
+            handleFiles(e.target.files);
+            fileInput.value = "";
+        })
+
+        // 拖拽事件
+        dropBox.addEventListener('dragover', (e)=>{
+            e.preventDefault();
+            dropBox.classList.add('active');
+        })
+        dropBox.addEventListener('dragleave', ()=>{
+            dropBox.classList.remove('active');
+        })
+        dropBox.addEventListener('drop', (e)=>{
+            e.preventDefault();
+            dropBox.classList.remove('active');
+            handleFiles(e.dataTransfer.files);
+        })
+
+        // ===================== JS 后端接入点 2：提交按钮点击事件 =====================
+        // 【队友重点改这里】
+        // 点击提交按钮后，把 selectedFiles 上传到后端接口，等待后端视频处理完成
+        // 后端返回结果后调用 setResult() 函数填充预览
+        submitBtn.addEventListener('click', async () => {
+            const videoFile = selectedFiles[0];
+            if(!videoFile){
+                resultText.textContent = "请先选择/拖拽视频文件！";
+                return;
+            }
+            if(!videoFile.type.startsWith("video/") && !/\.(mp4|mov|avi|mkv|webm)$/i.test(videoFile.name)){
+                resultText.textContent = "请选择 MP4、MOV、AVI、MKV 或 WebM 视频。";
+                return;
+            }
+
+            if(selectedFiles.length > 1){
+                resultText.textContent = "当前一次只支持一个视频文件，将使用第一个文件。";
+            }else{
+                resultText.textContent = "正在上传视频...";
+            }
+            videoPreview.src = "";
+            videoPreview.style.display = "none";
+            resultLink.hidden = true;
+            submitBtn.disabled = true;
+
+            const formData = new FormData();
+            formData.append("video", videoFile);
+
+            try{
+                const response = await fetch(`${API_BASE}/api/v1/jobs`, {
+                    method:"POST",
+                    body: formData
+                });
+                const job = await readJson(response);
+                if(!response.ok) throw new Error(job.detail || "任务创建失败");
+                activeJobId = job.id;
+                await pollJob(job.id);
+            }catch(err){
+                resultText.textContent = `请求出错：${err.message}`;
+            }finally{
+                submitBtn.disabled = false;
+            }
+        })
+
+        async function readJson(response){
+            try { return await response.json(); }
+            catch { return {}; }
+        }
+
+        async function pollJob(jobId){
+            stopPolling();
+            pollingJobId = jobId;
+            const token = ++pollingToken;
+            while(true){
+                if(token !== pollingToken) return;
+                let job;
+                try{
+                    const response = await fetch(`${API_BASE}/api/v1/jobs/${jobId}`);
+                    job = await readJson(response);
+                    if(!response.ok) throw new Error(job.detail || "无法查询任务状态");
+                }catch(error){
+                    stopPolling();
+                    resultText.textContent = `任务跟踪失败：${error.message}`;
+                    return;
+                }
+
+                updateJobProgress(job);
+                updateHistoryItem(job);
+                if(job.status === "completed"){
+                    setResult({
+                        success:true,
+                        info:`建模完成\n阶段：${job.stage}\n进度：100%`,
+                        modelUrl:`${API_BASE}${job.result_url}`
+                    });
+                    pollingJobId = null;
+                    return;
+                }
+                if(job.status === "failed"){
+                    setResult({success:false, info:job.error || "后台建模失败"});
+                    pollingJobId = null;
+                    return;
+                }
+                await new Promise(resolve => { pollingTimer = setTimeout(resolve, POLL_INTERVAL_MS); });
+            }
+        }
+
+        async function loadJobs(resumeRunning = true){
+            try{
+                const response = await fetch(`${API_BASE}/api/v1/jobs`);
+                const jobs = await readJson(response);
+                if(!response.ok) throw new Error(jobs.detail || "无法读取后台任务");
+                renderJobs(jobs);
+                const runningJob = resumeRunning && jobs.find(job => job.status === "queued" || job.status === "processing");
+                if(runningJob){
+                    activeJobId = runningJob.id;
+                    jobStartedAt = new Date(runningJob.created_at);
+                    await pollJob(runningJob.id);
+                }
+            }catch(error){
+                historyList.textContent = `读取失败：${error.message}`;
+            }
+        }
+
+        function renderJobs(jobs){
+            if(!Array.isArray(jobs)) return;
+            historyList.innerHTML = "";
+            if(jobs.length === 0){
+                historyList.textContent = "暂无后台任务";
+                return;
+            }
+            jobs.slice(0, 10).forEach(job => {
+                const item = document.createElement("div");
+                item.className = "history-item";
+                item.dataset.jobId = job.id;
+                item.innerHTML = `<span class="history-main"><strong></strong><small></small></span><span class="history-status"></span><span class="history-actions"></span>`;
+                item.querySelector("strong").textContent = job.filename;
+                item.querySelector("small").textContent = `${job.id} · ${job.stage}`;
+                item.querySelector(".history-status").textContent = `${statusLabel(job.status)} ${job.progress}%`;
+                item.addEventListener("click", () => selectJob(job));
+                addJobActions(item, job);
+                historyList.appendChild(item);
+            });
+        }
+
+        function updateHistoryItem(job){
+            const item = historyList.querySelector(`[data-job-id="${job.id}"]`);
+            if(!item){
+                loadJobs();
+                return;
+            }
+            item.dataset.jobStatus = job.status;
+            item.querySelector("small").textContent = `${job.id} · ${job.stage}`;
+            item.querySelector(".history-status").textContent = `${statusLabel(job.status)} ${job.progress}%`;
+            const actions = item.querySelector(".history-actions");
+            actions.replaceChildren();
+            addJobActions(item, job);
+        }
+
+        function addJobActions(item, job){
+            const actions = item.querySelector(".history-actions");
+            if(job.status === "completed" && job.result_url){
+                const previewButton = document.createElement("button");
+                previewButton.textContent = "预览";
+                previewButton.addEventListener("click", event => {
+                    event.stopPropagation();
+                    selectJob(job);
+                });
+                actions.appendChild(previewButton);
+            }
+            if(job.status === "failed" || job.status === "completed"){
+                const retryButton = document.createElement("button");
+                retryButton.className = "retry-button";
+                retryButton.textContent = "重试";
+                retryButton.addEventListener("click", event => {
+                    event.stopPropagation();
+                    retryJob(job.id);
+                });
+                actions.appendChild(retryButton);
+            }
+            if(job.status !== "queued" && job.status !== "processing"){
+                const deleteButton = document.createElement("button");
+                deleteButton.className = "delete-button";
+                deleteButton.textContent = "删除";
+                deleteButton.addEventListener("click", event => {
+                    event.stopPropagation();
+                    deleteJob(job.id);
+                });
+                actions.appendChild(deleteButton);
+            }
+        }
+
+        async function retryJob(jobId){
+            try{
+                const response = await fetch(`${API_BASE}/api/v1/jobs/${jobId}/retry`, {method:"POST"});
+                const job = await readJson(response);
+                if(!response.ok) throw new Error(job.detail || "重试失败");
+                activeJobId = job.id;
+                jobStartedAt = new Date(job.created_at);
+                await loadJobs(false);
+                await selectJob(job);
+            }catch(error){
+                resultText.textContent = `重试失败：${error.message}`;
+            }
+        }
+
+        async function deleteJob(jobId){
+            if(!window.confirm("确定删除这个任务及其模型文件吗？")) return;
+            try{
+                const response = await fetch(`${API_BASE}/api/v1/jobs/${jobId}`, {method:"DELETE"});
+                if(!response.ok){
+                    const error = await readJson(response);
+                    throw new Error(error.detail || "删除失败");
+                }
+                if(activeJobId === jobId) clearResultBtn.click();
+                await loadJobs(false);
+            }catch(error){
+                resultText.textContent = `删除失败：${error.message}`;
+            }
+        }
+
+        async function selectJob(job){
+            let latest = job;
+            try{
+                const response = await fetch(`${API_BASE}/api/v1/jobs/${job.id}`);
+                if(response.ok) latest = await response.json();
+            }catch(error){
+                /* 网络异常时沿用列表中的数据 */
+            }
+            activeJobId = latest.id;
+            jobStartedAt = new Date(latest.created_at);
+            updateJobProgress(latest);
+            if(latest.status === "queued" || latest.status === "processing") pollJob(latest.id);
+            if(latest.status === "completed" && latest.result_url){
+                resultLink.href = `${API_BASE}${latest.result_url}`;
+                resultLink.hidden = false;
+                showModel(`${API_BASE}${latest.result_url}`);
+            }
+            document.querySelector(".result-area").scrollIntoView({behavior:"smooth"});
+        }
+
+        function stopPolling(){
+            clearTimeout(pollingTimer);
+            pollingTimer = null;
+            pollingJobId = null;
+            pollingToken++;
+        }
+
+        function statusLabel(status){
+            return {queued:"排队中", processing:"处理中", completed:"已完成", failed:"失败"}[status] || status;
+        }
+
+        function updateJobProgress(job){
+            const progress = Number(job.progress || 0);
+            jobIdText.textContent = job.id || "-";
+            jobFileText.textContent = job.filename || "-";
+            progressBar.style.width = `${progress}%`;
+            progressPercent.textContent = `${progress}%`;
+            progressStage.textContent = job.stage || "处理中";
+            resultText.textContent = `任务状态：${job.status}\n当前阶段：${job.stage}\n整体进度：${progress}%\n更新时间：${formatDate(job.updated_at)}`;
+            if(job.status === "failed" && job.error){
+                resultText.textContent += `\n错误信息：${job.error}`;
+            }
+
+            if(!jobStartedAt && job.created_at) jobStartedAt = new Date(job.created_at);
+            updateElapsed(job.updated_at, job.status);
+
+            let currentIndex = -1;
+            let matchedLength = 0;
+            stageOrder.forEach(([, label], index) => {
+                if(job.stage && label && job.stage.includes(label) && label.length > matchedLength){
+                    currentIndex = index;
+                    matchedLength = label.length;
+                }
+            });
+            if(currentIndex < 0 && job.status === "failed" && progress > 0){
+                const thresholds = [1, 10, 20, 30, 45, 60, 75, 90];
+                thresholds.forEach((threshold, index) => {
+                    if(progress >= threshold) currentIndex = index;
+                });
+            }
+            stageItems.forEach((item, index) => {
+                item.classList.remove("active", "done", "failed");
+                const icon = item.querySelector(".stage-icon");
+                if(job.status === "failed" && index === Math.max(currentIndex, 0)){
+                    item.classList.add("failed");
+                    icon.textContent = "!";
+                }else if(job.status === "completed" || (currentIndex >= 0 && index < currentIndex)){
+                    item.classList.add("done");
+                    icon.textContent = "✓";
+                }else if(index === currentIndex){
+                    item.classList.add("active");
+                    icon.textContent = "…";
+                }else{
+                    icon.textContent = String(index + 1);
+                }
+            });
+        }
+
+        function formatDate(value){
+            if(!value) return "-";
+            return new Date(value).toLocaleTimeString();
+        }
+
+        function updateElapsed(updatedAt, status){
+            if(!jobStartedAt) return;
+            const end = status === "completed" || status === "failed" ? new Date(updatedAt) : new Date();
+            const seconds = Math.max(0, Math.floor((end - jobStartedAt) / 1000));
+            const minutes = Math.floor(seconds / 60);
+            jobElapsedText.textContent = `${minutes}分${String(seconds % 60).padStart(2, "0")}秒`;
+        }
+
+        // ===================== JS 后端接入点 3：渲染结果函数 =====================
+        // 调用：setResult({success:bool, info:"文本日志", modelUrl:"GLB地址"})
+        function setResult(resp){
+            if(resp.success){
+                resultText.textContent = resp.info;
+                if(resp.modelUrl){
+                    resultLink.href = resp.modelUrl;
+                    resultLink.hidden = false;
+                    showModel(resp.modelUrl);
+                }else{
+                    resultLink.hidden = true;
+                    modelViewerWrap.style.display = "none";
+                    videoPreview.style.display = "none";
+                }
+            }else{
+                resultText.textContent = `处理失败：${resp.info}`;
+                videoPreview.style.display = "none";
+                resultLink.hidden = true;
+                modelViewerWrap.style.display = "none";
+            }
+        }
+
+        function showModel(url){
+            videoPreview.style.display = "none";
+            modelViewer.src = url;
+            modelViewerWrap.style.display = "block";
+        }
+
+        // 清空预览按钮
+        clearResultBtn.addEventListener('click',()=>{
+            resultText.textContent = "等待后端处理输出...";
+            videoPreview.src = "";
+            resultLink.hidden = true;
+            modelViewer.src = "";
+            modelViewerWrap.style.display = "none";
+            stopPolling();
+            activeJobId = null;
+            jobStartedAt = null;
+            jobIdText.textContent = "-";
+            jobFileText.textContent = "-";
+            jobElapsedText.textContent = "-";
+            progressBar.style.width = "0%";
+            progressStage.textContent = "等待任务";
+            progressPercent.textContent = "0%";
+            stageItems.forEach((item, index) => {
+                item.classList.remove("active", "done", "failed");
+                item.querySelector(".stage-icon").textContent = String(index + 1);
+            });
+        })
+        // 清空文件按钮
+        clearFileBtn.addEventListener('click',()=>{
+            fileList.innerHTML = "";
+            selectedFiles = [];
+        })
+    </script>
+</body>
+</html>

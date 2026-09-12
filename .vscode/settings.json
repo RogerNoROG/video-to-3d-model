@@ -1,0 +1,20 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "/^/usr/bin/python -m uvicorn app\\.main:app --host 127\\.0\\.0\\.1 --port 8000$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^uvicorn app\\.main:app --host 127\\.0\\.0\\.1 --port 8000$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^\\./\\.venv/bin/python -m uvicorn app\\.main:app --host 127\\.0\\.0\\.1 --port 8000$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^\\./\\.venv/bin/python -m compileall -q app$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
+    }
+}

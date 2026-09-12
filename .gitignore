@@ -1,0 +1,15 @@
+# 虚拟环境（机器相关，目标机器需重建）
+.venv/
+
+# 任务数据：体积可达几十 GB，不进版本库，用 export_for_migration.sh 单独打包
+storage/
+
+# 运行时日志与 pid
+logs/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# 网格参数对比用的临时预览文件
+_preview_*.glb
