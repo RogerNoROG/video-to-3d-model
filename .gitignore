@@ -13,3 +13,6 @@ __pycache__/
 
 # 网格参数对比用的临时预览文件
 _preview_*.glb
+
+# 迁移备份包（体积可达数 GB，用 export_for_migration.sh 生成）
+migration-*.tar.gz
