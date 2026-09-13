@@ -210,6 +210,29 @@
             height:100%;
             --poster-color:#eef2f7;
         }
+        .model-switcher{
+            display:none;
+            flex-wrap:wrap;
+            gap:8px;
+            margin-top:18px;
+        }
+        .model-switcher button{
+            padding:6px 14px;
+            border:1px solid #cbd5e1;
+            border-radius:999px;
+            background:#fff;
+            color:#334155;
+            font-size:13px;
+            cursor:pointer;
+        }
+        .model-switcher button:hover{
+            border-color:#94a3b8;
+        }
+        .model-switcher button.active{
+            background:#2563eb;
+            border-color:#2563eb;
+            color:#fff;
+        }
         .history-area{
             margin-top:24px;
             background:#fff;
@@ -311,6 +334,7 @@
         <div class="result-area">
             <h3>处理结果预览区</h3>
             <video id="video-preview" controls></video>
+            <div class="model-switcher" id="modelSwitcher"></div>
             <div class="model-viewer-wrap" id="modelViewerWrap">
                 <model-viewer id="modelViewer" camera-controls auto-rotate shadow-intensity="1" exposure="1" environment-image="neutral" loading="lazy" alt="生成的三维模型"></model-viewer>
             </div>
@@ -350,6 +374,7 @@
         const videoPreview = document.getElementById('video-preview');
         const modelViewerWrap = document.getElementById('modelViewerWrap');
         const modelViewer = document.getElementById('modelViewer');
+        const modelSwitcher = document.getElementById('modelSwitcher');
         const resultText = document.getElementById('resultText');
         const submitBtn = document.getElementById('submitBtn');
         const clearResultBtn = document.getElementById('clearResultBtn');
@@ -385,7 +410,36 @@
 
         let selectedFiles = []; // 全局变量，保存选中的文件，提交时传给后端
 
+        // 直接用 URL 参数指定要预览的模型，方便查看单跑出来的模型（如两段扫描的合并结果）：
+        // video_upload.html?model=storage/xxx/merge/preview/c2.glb|候选2&model=...
+        // 参数值可用 "|" 附带显示标签，缺省时用文件名。
+        const overrideModels = new URLSearchParams(location.search).getAll('model').map(raw => {
+            const [path, label] = raw.split('|');
+            const url = /^https?:/i.test(path) ? path : new URL(path, location.href).href;
+            const fallback = decodeURIComponent(url.split('/').pop().replace(/\.glb$/i, ''));
+            return { url, name: label ? decodeURIComponent(label) : fallback };
+        });
+
+        function renderModelSwitcher(){
+            if(overrideModels.length === 0) return;
+            modelSwitcher.style.display = "flex";
+            overrideModels.forEach((entry, index) => {
+                const button = document.createElement('button');
+                button.textContent = entry.name;
+                if(index === 0) button.classList.add('active');
+                button.addEventListener('click', () => {
+                    modelSwitcher.querySelectorAll('button').forEach(item => item.classList.remove('active'));
+                    button.classList.add('active');
+                    showModel(entry.url);
+                });
+                modelSwitcher.appendChild(button);
+            });
+            resultText.textContent = `正在预览 URL 指定的模型（共 ${overrideModels.length} 个），点击上方按钮切换。`;
+            showModel(overrideModels[0].url);
+        }
+
         loadJobs();
+        renderModelSwitcher();
 
         // 格式化文件大小
         function formatSize(bytes) {
