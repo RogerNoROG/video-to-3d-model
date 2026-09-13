@@ -152,6 +152,56 @@ def remove_sparse_outliers(
     return filtered
 
 
+def keep_largest_point_component(
+    cloud: o3d.geometry.PointCloud, voxel_size: float, min_ratio: float = 0.0
+) -> o3d.geometry.PointCloud:
+    """在**点云层面**按三维连通性切掉与主体不相连的碎块。
+
+    为什么必须在点云层面做：Poisson 只会把靠得近的表面"焊"在一起，背景薄片
+    一旦被焊到主体上，网格级的 :func:`keep_significant_components` 就再也切不掉
+    了（它们已经是同一个连通分量）。实测某次碎块离主体仅 0.1 单位，Poisson 直接
+    连上。在点云里它们本来就是分离的两团。
+
+    做法：按 voxel_size 体素化 → 26 邻域建图 → 连通分量 → 只留不小于最大分量
+    ``min_ratio`` 的分量（``0`` = 只留最大的那一个）。
+    """
+    if voxel_size <= 0 or len(cloud.points) == 0:
+        return cloud
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components
+    from scipy.spatial import cKDTree
+
+    points = np.asarray(cloud.points)
+    index = np.floor(points / voxel_size).astype(np.int64)
+    unique, inverse = np.unique(index, axis=0, return_inverse=True)
+    if len(unique) < 2:
+        return cloud
+
+    # 索引空间里相邻体素差 1，半径取 1.75（>sqrt(3)）即 26 邻域
+    tree = cKDTree(unique)
+    pairs = tree.query_pairs(r=1.75, output_type="ndarray")
+    matrix = coo_matrix(
+        (np.ones(len(pairs)), (pairs[:, 0], pairs[:, 1])),
+        shape=(len(unique), len(unique)),
+    )
+    _, labels = connected_components(matrix, directed=False)
+
+    counts = np.bincount(labels)
+    keep = np.flatnonzero(counts >= counts.max() * min_ratio) if min_ratio > 0 else [int(counts.argmax())]
+    mask = np.isin(labels[inverse], keep)
+    result = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(points[mask]))
+    if cloud.has_colors():
+        result.colors = o3d.utility.Vector3dVector(np.asarray(cloud.colors)[mask])
+    if cloud.has_normals():
+        result.normals = o3d.utility.Vector3dVector(np.asarray(cloud.normals)[mask])
+    _log(
+        f"点云连通分量共 {len(counts)} 个（最大 {int(counts.max()):,} 体素），"
+        f"保留 {len(keep)} 个；点 {len(points):,} -> {len(result.points):,}"
+        f"（删掉 {(1 - mask.mean()) * 100:.2f}%）"
+    )
+    return result
+
+
 def keep_significant_components(mesh: o3d.geometry.TriangleMesh, min_ratio: float) -> o3d.geometry.TriangleMesh:
     """只保留足够大的连通分量。
 
