@@ -82,6 +82,7 @@ def fill_boundary_holes(
     loop_sizes = np.bincount(loop_labels)
 
     new_vertices: list[np.ndarray] = []
+    new_colors: list[np.ndarray] = []
     new_triangles: list[tuple[int, int, int]] = []
     center_of_loop: dict[int, int] = {}
     skipped = 0
@@ -94,6 +95,11 @@ def fill_boundary_holes(
             members = np.array([v for v, group in nodes.items() if loop_labels[group] == loop])
             center_of_loop[loop] = len(vertices) + len(new_vertices)
             new_vertices.append(vertices[members].mean(axis=0))
+            if colors is not None:
+                # ⚠️ 新顶点的颜色必须取**这个洞边界一圈**的平均色。
+                # 早先用了全网格平均色 → 每个补片渲染成一块深灰圆盘：
+                # 在棱上连成一条看得很清楚的“深色接缝”，放大才看出是一排放射状扇面。
+                new_colors.append(colors[members].mean(axis=0))
         # 原三角形用 a→b，补的面必须用 b→a
         new_triangles.append((center_of_loop[loop], int(b), int(a)))
 
@@ -112,9 +118,33 @@ def fill_boundary_holes(
         o3d.utility.Vector3iVector(all_triangles),
     )
     if colors is not None:
-        padded = np.vstack([colors, np.tile(colors.mean(axis=0), (len(new_vertices), 1))])
-        repaired.vertex_colors = o3d.utility.Vector3dVector(padded)
+        repaired.vertex_colors = o3d.utility.Vector3dVector(np.vstack([colors, np.array(new_colors)]))
     return repaired
+
+
+def snap_mesh_to_box(
+    mesh: o3d.geometry.TriangleMesh,
+    points: np.ndarray,
+    tolerance: float,
+) -> o3d.geometry.TriangleMesh:
+    """把伸出包围盒的顶点直接**夹回盒子表面**（而不是删三角形）。
+
+    比 :func:`clip_mesh_to_box` 好在哪：删三角形会在棱上切出一圈**毛边开口**，
+    补洞时再从圆心拉出放射状平面扇 —— 肉眼就是沿棱一条"深色接缝"（高倍放大能
+    看清 spokes）。夹取则是把凸出部分**压平贴到盒子面上**：不产生开口，补片与面
+    天然齐平。
+
+    代价：夹取会在面/棱处产生一些退化三角形，所以随后必须 Taubin 平滑 + 重算法线。
+    """
+    low = np.percentile(points, 0.5, axis=0) - tolerance
+    high = np.percentile(points, 99.5, axis=0) + tolerance
+    vertices = np.asarray(mesh.vertices)
+    outside = np.any((vertices < low) | (vertices > high), axis=1)
+    result = o3d.geometry.TriangleMesh(mesh)
+    result.vertices = o3d.utility.Vector3dVector(np.clip(vertices, low, high))
+    print(f"[finish] 盒夹（容差 {tolerance:.4f}）：{int(outside.sum()):,} 个盒外顶点被压回表面；"
+          f"不删三角形，因此不产生开口")
+    return result
 
 
 def clip_mesh_to_box(
@@ -173,6 +203,12 @@ def main() -> None:
              "用途：物体已知是立方体时，两段扫描在棱/角处各留一层表面，Poisson 会沿棱起"
              "皱长出毛屑，这些毛屑大多伸到盒外 —— 裁掉就能让棱变干净。",
     )
+    parser.add_argument(
+        "--snap-tol", type=float, default=0.0,
+        help="按输入点云的立方体包围盒**夹取**网格：盒外的顶点直接压回盒子表面。0=不夹。\n"
+             "与 --clip-tol 的区别：夹取不删三角形、不产生开口，因此不会在棱上留下"
+             "需要补洞的毛边（那种补片正是沿棱深色接缝的来源）。",
+    )
     parser.add_argument("--keep-temp", action="store_true")
     args = parser.parse_args()
 
@@ -208,7 +244,11 @@ def main() -> None:
     print(f"[finish] Poisson 输出 {len(mesh.vertices):,} 顶点 / {len(mesh.triangles):,} 三角面  "
           f"边界边 {count_boundary_edges(mesh):,}")
 
-    if args.clip_tol > 0:
+    if args.snap_tol > 0:
+        box_points = np.asarray(o3d.io.read_point_cloud(str(source)).points)
+        mesh = snap_mesh_to_box(mesh, box_points, args.snap_tol)
+        del box_points
+    elif args.clip_tol > 0:
         box_points = np.asarray(o3d.io.read_point_cloud(str(source)).points)
         mesh = clip_mesh_to_box(mesh, box_points, args.clip_tol)
         del box_points
