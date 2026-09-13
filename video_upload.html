@@ -411,9 +411,28 @@
         let selectedFiles = []; // 全局变量，保存选中的文件，提交时传给后端
 
         // 直接用 URL 参数指定要预览的模型，方便查看单跑出来的模型（如两段扫描的合并结果）：
-        // video_upload.html?model=storage/xxx/merge/preview/c2.glb|候选2&model=...
+        //   video_upload.html?model=storage/xxx/merge/preview/c2.glb|候选2&model=...
         // 参数值可用 "|" 附带显示标签，缺省时用文件名。
-        const overrideModels = new URLSearchParams(location.search).getAll('model').map(raw => {
+        // 同时支持写在 # 片段里：某些环境（远程工作区端口转发）会把查询串里的 "=" 改成
+        // "%3D"，那样浏览器会把整个 "model=xxx" 当成参数名。先整体 decode 再按 & 和 = 拆，
+        // 两种写法都能正确解析。
+        function readModelParams(){
+            const sources = [];
+            if(location.search.length > 1) sources.push(location.search.slice(1));
+            if(location.hash.length > 1) sources.push(location.hash.slice(1));
+            const values = [];
+            sources.forEach(source => {
+                let decoded = source;
+                try{ decoded = decodeURIComponent(source); }catch(error){ /* 原样使用 */ }
+                decoded.split('&').forEach(pair => {
+                    const index = pair.indexOf('=');
+                    if(index > 0 && pair.slice(0, index) === 'model') values.push(pair.slice(index + 1));
+                });
+            });
+            return values;
+        }
+
+        const overrideModels = readModelParams().map(raw => {
             const [path, label] = raw.split('|');
             const url = /^https?:/i.test(path) ? path : new URL(path, location.href).href;
             const fallback = decodeURIComponent(url.split('/').pop().replace(/\.glb$/i, ''));
