@@ -117,6 +117,40 @@ def fill_boundary_holes(
     return repaired
 
 
+def clip_mesh_to_box(
+    mesh: o3d.geometry.TriangleMesh,
+    points: np.ndarray,
+    tolerance: float,
+) -> o3d.geometry.TriangleMesh:
+    """把伸出「点云 0.5%/99.5% 分位包围盒」超过 tolerance 的三角形删掉。
+
+    物体已知是立方体时，两段扫描在棱/角处各留一层表面，Poisson 会沿棱起皱长出
+    毛屑；这些毛屑大多伸到盒外 —— 直接按盒裁掉，比想办法在点云里分开两层简单得多。
+    切出的小口交给后面的补洞步骤。
+
+    ⚠ 裁完必须重算法线（跟补洞一样），否则明暗会错。
+    """
+    low = np.percentile(points, 0.5, axis=0) - tolerance
+    high = np.percentile(points, 99.5, axis=0) + tolerance
+    vertices = np.asarray(mesh.vertices)
+    triangles = np.asarray(mesh.triangles)
+    inside = np.all((vertices >= low) & (vertices <= high), axis=1)
+    keep = inside[triangles].all(axis=1)
+
+    result = o3d.geometry.TriangleMesh(
+        o3d.utility.Vector3dVector(vertices), o3d.utility.Vector3iVector(triangles[keep])
+    )
+    if mesh.has_vertex_colors():
+        result.vertex_colors = mesh.vertex_colors
+    result.remove_unreferenced_vertices()
+    print(
+        f"[finish] 盒裁（容差 {tolerance:.4f}）：盒外顶点 {int((~inside).sum()):,} 个，"
+        f"删掉 {len(triangles) - len(result.triangles):,} 三角面，"
+        f"剩 {len(result.vertices):,} 顶点 / {len(result.triangles):,} 三角面"
+    )
+    return result
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", required=True, help="输入点云 PLY")
@@ -129,7 +163,15 @@ def main() -> None:
         "--pre-voxel", type=float, default=0.0,
         help="先按这个体素边长下采样（体素内取平均）来降噪，0=不降噪。"
              "实测两段扫描残余错位约 0.0056，是数据精度上限；体素平均能把随机噪声压下去，"
-             "但体素小于错位时两层表面会糊成一条带，所以取 0.002~0.004 比较合适。",
+             "但体素小于错位时两层表面会糊成一条带，所以取 0.002~0.004 比较合适。"
+             "⚠ 实测这条路对本项目更差（异物被糊成更大的整块），保留但别用。",
+    )
+    parser.add_argument(
+        "--clip-tol", type=float, default=0.0,
+        help="按输入点云的立方体包围盒裁网格：顶点伸出盒外超过该容差的三角形直接删掉，"
+             "随后由补洞步骤把切出来的小口补平。0=不裁。\n"
+             "用途：物体已知是立方体时，两段扫描在棱/角处各留一层表面，Poisson 会沿棱起"
+             "皱长出毛屑，这些毛屑大多伸到盒外 —— 裁掉就能让棱变干净。",
     )
     parser.add_argument("--keep-temp", action="store_true")
     args = parser.parse_args()
@@ -165,6 +207,11 @@ def main() -> None:
     mesh = o3d.io.read_triangle_mesh(str(rough))
     print(f"[finish] Poisson 输出 {len(mesh.vertices):,} 顶点 / {len(mesh.triangles):,} 三角面  "
           f"边界边 {count_boundary_edges(mesh):,}")
+
+    if args.clip_tol > 0:
+        box_points = np.asarray(o3d.io.read_point_cloud(str(source)).points)
+        mesh = clip_mesh_to_box(mesh, box_points, args.clip_tol)
+        del box_points
 
     mesh = fill_boundary_holes(mesh, args.max_hole_edges)
     print(f"[finish] 补洞后 边界边 {count_boundary_edges(mesh):,}")
