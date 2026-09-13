@@ -125,6 +125,12 @@ def main() -> None:
     parser.add_argument("--density-quantile", type=float, default=0.005)
     parser.add_argument("--smooth-iterations", type=int, default=3, help="Taubin 迭代次数，0=不平滑")
     parser.add_argument("--max-hole-edges", type=int, default=0, help="只补不超过这么多条边的开口，0=全补")
+    parser.add_argument(
+        "--pre-voxel", type=float, default=0.0,
+        help="先按这个体素边长下采样（体素内取平均）来降噪，0=不降噪。"
+             "实测两段扫描残余错位约 0.0056，是数据精度上限；体素平均能把随机噪声压下去，"
+             "但体素小于错位时两层表面会糊成一条带，所以取 0.002~0.004 比较合适。",
+    )
     parser.add_argument("--keep-temp", action="store_true")
     args = parser.parse_args()
 
@@ -134,6 +140,15 @@ def main() -> None:
     rough = target.with_suffix(".rough.glb")
 
     print(f"[finish] Poisson（深度上限 {args.depth}）...")
+    if args.pre_voxel > 0:
+        raw = o3d.io.read_point_cloud(str(source))
+        before = len(raw.points)
+        smoothed = raw.voxel_down_sample(args.pre_voxel)
+        print(f"[finish] 体素降噪 {args.pre_voxel:.4f}: {before:,} -> {len(smoothed.points):,} 点")
+        source = target.with_suffix(".pre.ply")
+        o3d.io.write_point_cloud(str(source), smoothed, write_ascii=False)
+        del raw, smoothed
+
     point_cloud_to_glb(
         source,
         rough,
@@ -169,6 +184,8 @@ def main() -> None:
           f"总耗时 {time.monotonic() - started:.0f}s")
     if not args.keep_temp:
         rough.unlink(missing_ok=True)
+        if args.pre_voxel > 0:
+            target.with_suffix(".pre.ply").unlink(missing_ok=True)
 
 
 if __name__ == "__main__":
