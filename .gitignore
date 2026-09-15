@@ -1,18 +1,60 @@
-# 虚拟环境（机器相关，目标机器需重建）
+# 本地 Python 环境（机器相关，目标机器需从 requirements.txt 重建）
 .venv/
+.python-version
 
-# 任务数据：体积可达几十 GB，不进版本库，用 export_for_migration.sh 单独打包
+# 任务数据和项目索引：视频、COLMAP 工作区、点云、模型、审计和缓存都在这里，
+# 体积可达几十 GB，且可能包含用户拍摄内容，绝不进版本库。
 storage/
 
-# 运行时日志与 pid
+# 运行时日志、PID 与临时输出
 logs/
+*.log
+*.pid
 
 # Python
 __pycache__/
 *.py[cod]
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
 
-# 网格参数对比用的临时预览文件
+# 重建中间产物和导出模型。代码、README 和可复现的命令应提交；
+# PLY/GLB/数据库均由本地视频产生，不能作为源码版本管理。
+*.ply
+*.ply.vis
+*.glb
+*.gltf
+*.obj
+*.stl
+*.bin
+*.db
+*.sqlite
+*.sqlite3
 _preview_*.glb
 
-# 迁移备份包（体积可达数 GB，用 export_for_migration.sh 生成）
-migration-*.tar.gz
+# 拍摄素材：动辄几百 MB 到 GB，且可能含敏感环境信息，绝不进版本库。
+# 任务目录里的 input.* 也属于 storage/；根目录素材同样不应被追踪。
+# 已被 Git 追踪的历史视频需要另行 git rm --cached 后才会真正移出后续提交。
+*.mp4
+*.MP4
+*.mov
+*.MOV
+*.avi
+*.AVI
+*.mkv
+*.MKV
+*.webm
+*.WEBM
+
+# 本地配置与编辑器状态。提交 .env.example 或共享配置模板，不提交实际值。
+.env
+.env.*
+!.env.example
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

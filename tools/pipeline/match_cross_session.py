@@ -23,7 +23,7 @@
 
 用法
 ----
-    ./.venv/bin/python tools/match_cross_session.py --job <任务id>
+    ./.venv/bin/python tools/pipeline/match_cross_session.py --job <任务id>
     # 然后
     colmap matches_importer --database_path <job>/supp/database.db \\
         --match_list_path <job>/supp/cross_matches.txt --match_type inliers

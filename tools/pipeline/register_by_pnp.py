@@ -9,13 +9,13 @@
 而 ALIKED 匹配器的门限参数 `--AlikedMatching.brute_force_min_cossim` 又是死的
 （0.85 扫到 0.30，匹配对数全程不变），所以跨场次匹配没法走 COLMAP 自己的路。
 
-既然匹配已经自己算出来了（tools/match_cross_session.py），位姿也自己算：
+既然匹配已经自己算出来了（tools/pipeline/match_cross_session.py），位姿也自己算：
 二维点来自补拍帧的关键点，三维点来自原模型 points3D 的 TRACK，
 用已知内参做 DLT + RANSAC 求相机位姿，再把新图写进模型。
 
 用法
 ----
-    ./.venv/bin/python tools/register_by_pnp.py --job <任务id> --model sparse/0
+    ./.venv/bin/python tools/pipeline/register_by_pnp.py --job <任务id> --model sparse/0
 """
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ from pathlib import Path
 
 import numpy as np
 
-REPO = Path(__file__).resolve().parent.parent
+REPO = Path(__file__).resolve().parents[2]
 COLMAP = str(Path.home() / ".local/bin/colmap")
 CAMERA_MODELS = {0: "SIMPLE_PINHOLE", 1: "PINHOLE", 2: "SIMPLE_RADIAL", 3: "RADIAL"}
 

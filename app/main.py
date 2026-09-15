@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import re
 import shutil
 import subprocess
+import sys
 import sysconfig
 import threading
 import uuid
@@ -18,8 +20,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+import open3d as o3d
 
-from app.convert import point_cloud_to_glb
+from app.convert import crop_outliers, keep_object_by_color, point_cloud_to_glb
 
 
 class Settings(BaseSettings):
@@ -71,6 +74,9 @@ class Settings(BaseSettings):
     # 这是唯一可靠的分离手段：几何上物块与桌面完全连通、密度上桌面更密、
     # RANSAC 平面会命中物体自己的面
     mesh_object_warmth: float = Field(default=-1.0, ge=-1.0, le=1.0)
+    # 项目任务会额外保存一份已分离主体的点云。黄色物块在现有数据中以 0.08
+    # 可稳定排除灰白背景；原始 fused.ply 始终保留，任何过滤异常都会回退原始点云。
+    project_object_warmth: float = Field(default=0.08, ge=0.0, le=1.0)
     # Poisson 深度的上限（内存约束）。八叉树叶节点数约为 8^depth，每 +1 内存约 ×8，
     # 24GB 内存下 9 已是上限（实测 9 在 1854 万点上会耗尽内存）
     poisson_max_depth: int = Field(default=9, ge=5, le=12)
@@ -78,6 +84,12 @@ class Settings(BaseSettings):
     poisson_orient_max_points: int = Field(default=5_000_000, gt=0)
     use_gpu: bool = True
     gpu_index: int = Field(default=0, ge=0)
+    # 资源用量控制：**CPU 用满，只压内存**。
+    # num_threads = -1 是 COLMAP 默认值，即用满所有核 —— 保持不动。
+    # 真正要收的是 cache_size：它默认 32 GB，比这台机器 24 GB 的物理内存还大，
+    # 会把内存吃千并触发 WSL 虚拟机的内存回收。
+    colmap_num_threads: int = Field(default=-1, ge=-1)
+    colmap_cache_size_gb: int = Field(default=8, ge=1, le=128)
     prefer_cuda: bool = True
     allow_cpu_fallback: bool = True
     stale_job_timeout_seconds: int = Field(default=3600, gt=0)
@@ -103,6 +115,14 @@ class Settings(BaseSettings):
     guided_matching: bool = True
     # 融合调参
     stereo_fusion_min_num_pixels: int = Field(default=3, gt=0)
+    # 融合时每张图参考多少张邻居做一致性检查（COLMAP 默认 50）。
+    # ★ 这是 fusion 阶段内存和 IO 的**总开关**：每张图要读 1+check_num_images
+    #   份深度/法线图（本任务单份 16 MB）。50 → 816 MB/张，1325 张共 ~550 GB
+    #   读取量，工作集远超 24 GB 物理内存，实测退化成 ~2 分钟/张（预计 44 小时）
+    #   且 CPU 只用 1 个核（其余全在等换页）。
+    #   视频抽帧相邻帧高度冗余，50 张参考里有 40 张几乎重复，降到 10 既保住质量，
+    #   又把工作集压到 ~176 MB/张，缓存命中率接近 100%，IO 降到 82 GB（只读一遍）。
+    stereo_fusion_check_num_images: int = Field(default=10, ge=1, le=200)
     # 稠密重建的分辨率上限。稠密耗时与像素数近似成正比，调低可大幅提速（代价是细节减少）
     # -1 表示使用原始分辨率（1920x1080）；常用值 1600 / 1280 / 960
     patch_match_max_image_size: int = Field(default=-1, ge=-1)
@@ -126,6 +146,15 @@ class JobStatus(str, Enum):
     failed = "failed"
 
 
+class StepEta(BaseModel):
+    """一个重建步骤的只读进度预测。"""
+
+    key: str
+    label: str
+    status: str
+    eta_seconds: int | None = None
+
+
 class Job(BaseModel):
     id: str
     filename: str
@@ -136,6 +165,31 @@ class Job(BaseModel):
     updated_at: datetime
     error: str | None = None
     result_url: str | None = None
+    # 项目是可选的，以兼容历史任务和当前正在运行的旧任务。
+    project_id: str | None = None
+    # 在项目中的提交顺序。用于区分首段扫描与后续补拍，即使用户在首段完成前继续上传。
+    project_sequence: int | None = None
+    # 以下字段由读取接口实时推导，不能写进 job.json：输出速度会持续变化。
+    eta_seconds: int | None = None
+    stage_eta_seconds: int | None = None
+    step_etas: list[StepEta] = Field(default_factory=list)
+
+
+class Artifact(BaseModel):
+    name: str
+    path: str
+    kind: str = "model"
+    approved: bool = False
+
+
+class Project(BaseModel):
+    id: str
+    name: str
+    description: str = ""
+    job_ids: list[str] = Field(default_factory=list)
+    artifacts: list[Artifact] = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime
 
 
 class JobStore:
@@ -258,7 +312,156 @@ class JobStore:
             self._jobs.pop(job_id, None)
 
 
+class ProjectStore:
+    """轻量项目索引；任务目录保持原位，避免影响正在运行的 pipeline。"""
+
+    def __init__(self) -> None:
+        self._projects: dict[str, Project] = {}
+        self._lock = threading.Lock()
+        self._load()
+
+    @property
+    def index_file(self) -> Path:
+        return settings.storage_dir / "projects.json"
+
+    def _load(self) -> None:
+        try:
+            raw = json.loads(self.index_file.read_text(encoding="utf-8"))
+            entries = raw if isinstance(raw, list) else raw.get("projects", [])
+            for item in entries:
+                project = Project.model_validate(item)
+                self._projects[project.id] = project
+        except (OSError, ValueError, TypeError, AttributeError):
+            return
+
+    def _persist(self) -> None:
+        self.index_file.write_text(
+            json.dumps({"projects": [p.model_dump(mode="json") for p in self._projects.values()]}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+    def list(self) -> list[Project]:
+        with self._lock:
+            return sorted(self._projects.values(), key=lambda p: p.updated_at, reverse=True)
+
+    def get(self, project_id: str) -> Project:
+        with self._lock:
+            project = self._projects.get(project_id)
+        if project is None:
+            raise HTTPException(status_code=404, detail="项目不存在")
+        return project
+
+    def create(self, name: str, description: str = "", project_id: str | None = None) -> Project:
+        now = datetime.now(timezone.utc)
+        project = Project(id=project_id or uuid.uuid4().hex, name=name.strip() or "未命名项目", description=description, created_at=now, updated_at=now)
+        with self._lock:
+            self._projects[project.id] = project
+            self._persist()
+        return project
+
+    def update(self, project_id: str, **changes: object) -> Project:
+        with self._lock:
+            current = self._projects.get(project_id)
+            if current is None:
+                raise HTTPException(status_code=404, detail="项目不存在")
+            updated = current.model_copy(update={"updated_at": datetime.now(timezone.utc), **changes})
+            self._projects[project_id] = updated
+            self._persist()
+            return updated
+
+    def add_job(self, project_id: str, job: Job) -> Project:
+        project = self.get(project_id)
+        ids = list(project.job_ids)
+        if job.id not in ids:
+            ids.append(job.id)
+        artifacts = list(project.artifacts)
+        model_path = job_dir(job.id) / "merge" / "merged_cube_final.glb"
+        if model_path.exists() and not any(a.path == str(model_path) for a in artifacts):
+            artifacts.append(Artifact(name="黄色正方体定稿", path=str(model_path), approved=True))
+        return self.update(project_id, job_ids=ids, artifacts=artifacts)
+
+    def add_artifact(self, project_id: str, artifact: Artifact) -> Project:
+        project = self.get(project_id)
+        # 以路径去重，允许登记时更新同一产物的名称或审核状态。
+        artifacts = [item for item in project.artifacts if item.path != artifact.path]
+        artifacts.append(artifact)
+        return self.update(project_id, artifacts=artifacts)
+
+
+def seed_projects() -> None:
+    """建立历史黄色物块项目索引；不写入任何任务目录。"""
+    if projects.list():
+        return
+    project = projects.create("黄色正方体物块", "黄色/木色立方体及四分之一圆环凹槽的全部扫描、修复和交付产物。", project_id="yellow-cube")
+    historical = ["e7f9f9e5d046490d93b34e4538bc9ef1", "1a479e264ad34e54bf33957ff9841254", "078ba28f089846bca6c5fd2d8456a4d4"]
+    ids = [jid for jid in historical if (settings.storage_dir / jid / "job.json").exists()]
+    artifacts = list(project.artifacts)
+    final_path = settings.storage_dir / historical[0] / "merge" / "merged_cube_final.glb"
+    if final_path.exists():
+        artifacts.append(Artifact(name="干净定稿模型", path=str(final_path), approved=True))
+    projects.update(project.id, job_ids=ids, artifacts=artifacts)
+
+
+def reconcile_project_index() -> None:
+    """把已完成的新任务加入黄色物块项目，并登记独立候选产物。
+
+    只修改项目索引，不改任务目录；候选默认未批准，避免前端误把错误面当定稿。
+    """
+    project = projects.get("yellow-cube")
+    new_job_id = "0965f558d11a4c7b9ce96ac869ca5368"
+    job_file = settings.storage_dir / new_job_id / "job.json"
+    if not job_file.exists():
+        return
+    try:
+        job = Job.model_validate_json(job_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if new_job_id not in project.job_ids:
+        project = projects.update(project.id, job_ids=[*project.job_ids, new_job_id])
+    candidate_dir = settings.storage_dir / "yellow-cube" / "merge" / "latest-0965"
+    candidates = list(project.artifacts)
+    for index in (1, 2, 3):
+        path = candidate_dir / f"candidate_{index}.glb"
+        if path.exists() and not any(item.path == str(path) for item in candidates):
+            candidates.append(Artifact(name=f"新视频候选合并 {index}", path=str(path), approved=False))
+    six_face = settings.storage_dir / "yellow-cube" / "six-face-v1" / "final-v3" / "merged_six_face_depth9.glb"
+    if six_face.exists() and not any(item.path == str(six_face) for item in candidates):
+        candidates.append(Artifact(
+            name="三次扫描五面融合高密度候选",
+            path=str(six_face),
+            kind="candidate",
+            approved=False,
+        ))
+    edge_repair = settings.storage_dir / "yellow-cube" / "six-face-v1" / "edge-repair-v1" / "merged_six_face_real_edges_depth9.glb"
+    if edge_repair.exists() and not any(item.path == str(edge_repair) for item in candidates):
+        candidates.append(Artifact(
+            name="真实数据棱角补强候选",
+            path=str(edge_repair),
+            kind="candidate",
+            approved=False,
+        ))
+    hole_repair = settings.storage_dir / "yellow-cube" / "six-face-v1" / "hole-repair-v1" / "merged_six_face_hole_repaired_depth9.glb"
+    if hole_repair.exists() and not any(item.path == str(hole_repair) for item in candidates):
+        candidates.append(Artifact(
+            name="真实数据局部底面修复候选",
+            path=str(hole_repair),
+            kind="candidate",
+            approved=False,
+        ))
+    feature_planes = settings.storage_dir / "yellow-cube" / "six-face-v1" / "feature-and-plane-v1" / "merged_six_face_feature_protected_planes.glb"
+    if feature_planes.exists() and not any(item.path == str(feature_planes) for item in candidates):
+        candidates.append(Artifact(
+            name="贯穿圆孔保护与外平面平滑候选",
+            path=str(feature_planes),
+            kind="candidate",
+            approved=False,
+        ))
+    if candidates != project.artifacts:
+        projects.update(project.id, artifacts=candidates)
+
+
 store = JobStore()
+projects = ProjectStore()
 pipeline_lock = threading.Lock()
 app = FastAPI(title="Video to 3D Model API", version="0.1.0")
 app.add_middleware(
@@ -270,6 +473,25 @@ app.add_middleware(
 )
 
 
+class ProjectCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    description: str = Field(default="", max_length=1000)
+
+
+class ProjectPatch(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    description: str | None = Field(default=None, max_length=1000)
+
+
+class ArtifactCreate(BaseModel):
+    """登记已生成的项目产物；仅允许 storage/ 下的现有文件。"""
+
+    name: str = Field(min_length=1, max_length=160)
+    path: str = Field(min_length=1)
+    kind: str = Field(default="model", max_length=40)
+    approved: bool = False
+
+
 def job_dir(job_id: str) -> Path:
     return settings.storage_dir / job_id
 
@@ -278,15 +500,287 @@ def result_file(job_id: str) -> Path:
     return job_dir(job_id).resolve() / "model.glb"
 
 
+# 只创建/更新 projects.json；历史任务目录与运行中的任务完全不动。
+seed_projects()
+reconcile_project_index()
+
+
 def point_cloud_file(job_id: str) -> Path:
     return job_dir(job_id).resolve() / "fused.ply"
+
+
+ETA_STEPS: tuple[tuple[str, str], ...] = (
+    ("prepare", "检查并规范化视频"),
+    ("frames", "抽取关键帧"),
+    ("features", "提取图像特征"),
+    ("matching", "匹配相邻帧"),
+    ("poses", "估计相机位姿"),
+    ("dense", "生成稠密深度图"),
+    ("fusion", "融合点云"),
+    ("mesh", "重建网格并导出 GLB"),
+    ("subject", "分离目标物体"),
+    ("project_merge", "对齐项目模型并补充细节"),
+)
+
+
+def _stage_key(job: Job) -> str | None:
+    """从正在显示的阶段文字判定流程步骤；文字同时兼容旧任务。"""
+    stage = job.stage
+    if job.status == JobStatus.completed:
+        return None
+    if "项目内" in stage or "对齐项目" in stage or "补充细节" in stage:
+        return "project_merge"
+    if "分离目标" in stage or "主体清理" in stage:
+        return "subject"
+    if "网格" in stage or "GLB" in stage or "重建模型" in stage:
+        return "mesh"
+    if "融合" in stage:
+        return "fusion"
+    if "稠密" in stage or "patch_match" in stage:
+        return "dense"
+    if "位姿" in stage or "注册图像" in stage:
+        return "poses"
+    if "匹配" in stage:
+        return "matching"
+    if "特征" in stage:
+        return "features"
+    if "抽取" in stage:
+        return "frames"
+    if "视频" in stage or "转码" in stage or "规格" in stage:
+        return "prepare"
+    return None
+
+
+def _dense_stage_progress(job: Job, dense: Path) -> tuple[int, int] | None:
+    """优先使用阶段中的计数；续跑的旧阶段则从已写的深度图推断。"""
+    match = re.search(r"[（(]\s*(\d+)\s*/\s*(\d+)\s*[）)]", job.stage)
+    if match:
+        return int(match.group(1)), int(match.group(2))
+    views = count_dense_views(dense)
+    if not views:
+        return None
+    total = views * (2 if settings.patch_match_geom_consistency else 1)
+    return min(count_dense_depth_maps(dense), total), total
+
+
+def _dense_rate_seconds_per_output(dense: Path) -> float | None:
+    """根据最近完成的深度图文件估计真实速率，忽略启动阶段的波动。"""
+    maps = dense / "stereo" / "depth_maps"
+    try:
+        times = sorted(path.stat().st_mtime for path in maps.glob("*.bin"))
+    except OSError:
+        return None
+    # 末尾 20 个输出能跟上当前 GPU/CPU 状态，又不会被最初缓存预热拉偏。
+    sample = times[-20:]
+    if len(sample) < 2 or sample[-1] <= sample[0]:
+        return None
+    return (sample[-1] - sample[0]) / (len(sample) - 1)
+
+
+def _step_duration_estimates(job: Job) -> dict[str, int]:
+    """保守的计划时长；稠密阶段开始后会被真实输出速率替代。"""
+    root = job_dir(job.id)
+    frames = sum(1 for _ in (root / "frames").glob("*.jpg"))
+    dense = root / "dense"
+    dense_progress = _dense_stage_progress(job, dense)
+    dense_outputs = dense_progress[1] if dense_progress else max(frames * (2 if settings.patch_match_geom_consistency else 1), 1)
+    views = max(dense_outputs // (2 if settings.patch_match_geom_consistency else 1), frames, 1)
+    # 这些是无实时计数时的初始计划值。它们会在任务进入对应步骤后由输出/日志
+    # 更新；没有足够样本时宁可保守些，也不把预计时间伪装成精确时间。
+    return {
+        "prepare": 90,
+        "frames": max(45, int(max(frames, 90) * 0.25)),
+        "features": max(90, int(max(frames, 90) * 0.8)),
+        "matching": max(120, int(max(frames, 90) * 1.2)),
+        "poses": max(180, int(max(frames, 90) * 1.5)),
+        "dense": max(300, dense_outputs * 25),
+        "fusion": max(180, views * 7),
+        "subject": 300,
+        "mesh": 900,
+        "project_merge": 1800,
+    }
+
+
+def with_eta(job: Job) -> Job:
+    """为 API 响应附加 ETA，不修改内存任务或磁盘上的 job.json。"""
+    estimates = _step_duration_estimates(job)
+    active = _stage_key(job)
+    dense = job_dir(job.id) / "dense"
+    stage_eta: int | None = None
+
+    if job.status == JobStatus.processing and active:
+        if active == "dense":
+            progress = _dense_stage_progress(job, dense)
+            seconds_per_output = _dense_rate_seconds_per_output(dense)
+            if progress and seconds_per_output is not None:
+                done, total = progress
+                stage_eta = max(0, round((total - done) * seconds_per_output))
+            elif progress:
+                done, total = progress
+                stage_eta = max(0, (total - done) * 25)
+        else:
+            stage_eta = estimates[active]
+
+    steps: list[StepEta] = []
+    active_index = next((i for i, (key, _) in enumerate(ETA_STEPS) if key == active), None)
+    for index, (key, label) in enumerate(ETA_STEPS):
+        if job.status == JobStatus.completed:
+            step_status, eta = "done", None
+        elif job.status == JobStatus.failed:
+            step_status = "failed" if key == active else ("done" if active_index is not None and index < active_index else "pending")
+            eta = None if step_status != "pending" else estimates[key]
+        elif active_index is None:
+            step_status, eta = "pending", estimates[key]
+        elif index < active_index:
+            step_status, eta = "done", None
+        elif index == active_index:
+            step_status, eta = "active", stage_eta
+        else:
+            step_status, eta = "pending", estimates[key]
+        steps.append(StepEta(key=key, label=label, status=step_status, eta_seconds=eta))
+
+    total_eta: int | None = None
+    if job.status == JobStatus.processing and active_index is not None and stage_eta is not None:
+        total_eta = stage_eta + sum(estimates[key] for key, _ in ETA_STEPS[active_index + 1:])
+    return job.model_copy(update={"eta_seconds": total_eta, "stage_eta_seconds": stage_eta, "step_etas": steps})
 
 
 def persist_job(job: Job) -> None:
     job_dir(job.id).mkdir(parents=True, exist_ok=True)
     (job_dir(job.id) / "job.json").write_text(
-        job.model_dump_json(indent=2), encoding="utf-8"
+        job.model_dump_json(indent=2, exclude={"eta_seconds", "stage_eta_seconds", "step_etas"}), encoding="utf-8"
     )
+
+
+def object_cloud_file(job_id: str) -> Path:
+    """项目自动合并唯一允许读取的、已分离主体点云。"""
+    return job_dir(job_id).resolve() / "project" / "object_only.ply"
+
+
+def _project_path(path: Path) -> str:
+    """项目索引使用工作区相对路径，保证服务重启后仍能读取。"""
+    return str(path.resolve().relative_to(Path.cwd().resolve()))
+
+
+def _write_project_audit(destination: Path, payload: dict) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def extract_project_object(job_id: str) -> Path:
+    """从单次稠密点云得到项目级主体来源；原始点云从不修改。"""
+    source = point_cloud_file(job_id)
+    if not source.is_file() or source.stat().st_size == 0:
+        raise RuntimeError("缺少 fused.ply，无法分离项目主体")
+    cloud = o3d.io.read_point_cloud(str(source))
+    if not len(cloud.points):
+        raise RuntimeError("fused.ply 为空，无法分离项目主体")
+    before = len(cloud.points)
+    cleaned = crop_outliers(cloud, settings.poisson_outlier_percentile)
+    # 这是一项有意保守的颜色分离：keep_object_by_color 在比例异常时会原样返回，
+    # 避免把没有明显色差的物体裁残。黄色物块已用 0.08 验证能去掉灰白背景。
+    cleaned = keep_object_by_color(cleaned, settings.project_object_warmth)
+    output = object_cloud_file(job_id)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    o3d.io.write_point_cloud(str(output), cleaned, write_ascii=False)
+    _write_project_audit(output.with_name("object_extraction.json"), {
+        "job": job_id,
+        "source": _project_path(source),
+        "output": _project_path(output),
+        "points_before": int(before),
+        "points_after": int(len(cleaned.points)),
+        "warmth_threshold": settings.project_object_warmth,
+        "object_extent": [float(value) for value in (cleaned.get_max_bound() - cleaned.get_min_bound())],
+        "rule": "原始 fused.ply 保留不动；项目合并只读取 object_only.ply，颜色分离比例异常时自动回退为未按色删除的点云。",
+    })
+    return output
+
+
+def _project_reference(project: Project, exclude_job_id: str) -> Path | None:
+    """优先使用已批准模型；新项目没有批准模型时使用最早的主体点云。"""
+    for artifact in project.artifacts:
+        if artifact.approved:
+            candidate = Path(artifact.path).resolve()
+            if candidate.is_file():
+                return candidate
+    prior = sorted(
+        (
+            job for job in store.list()
+            if job.project_id == project.id
+            and job.id != exclude_job_id
+            and job.status == JobStatus.completed
+        ),
+        key=lambda item: (item.project_sequence or 0, item.created_at),
+    )
+    for job in prior:
+        candidate = object_cloud_file(job.id)
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def run_project_postprocess(job_id: str) -> str:
+    """首段做主体交付；补拍做独立坐标系对齐候选，不自动覆盖批准模型。"""
+    job = store.get(job_id)
+    if not job.project_id:
+        return ""
+    project = projects.get(job.project_id)
+    object_cloud = object_cloud_file(job_id)
+    if not object_cloud.is_file():
+        update_stage(job_id, 97, "项目内分离目标物体并保留原始点云")
+        object_cloud = extract_project_object(job_id)
+    reference = _project_reference(project, job_id)
+    is_first = job.project_sequence == 1 or reference is None
+    if is_first:
+        object_model = result_file(job_id)
+        projects.add_artifact(project.id, Artifact(
+            name=f"首段主体模型 · {job.filename}",
+            path=_project_path(object_model), kind="model", approved=False,
+        ))
+        return "；已分离首段主体，原始背景结果已保留作追溯"
+
+    output = settings.storage_dir / project.id / "automation" / job_id
+    output.mkdir(parents=True, exist_ok=True)
+    update_stage(job_id, 99, "项目内对齐既有模型并生成补细节候选")
+    command = [
+        sys.executable, str(Path("tools/fusion/merge_two_jobs.py").resolve()),
+        "--a", str(reference), "--b", str(object_cloud), "--out", str(output),
+        "--top", "4", "--glb", "3", "--warmth-a", "-1", "--warmth-b", "-1",
+    ]
+    run_command(command, job_dir(job_id).resolve())
+    candidates = []
+    for rank in range(1, 4):
+        path = output / f"candidate_{rank}.glb"
+        if not path.is_file():
+            continue
+        projects.add_artifact(project.id, Artifact(
+            name=f"补拍对齐候选 {rank} · {job.filename}",
+            path=_project_path(path), kind="alignment-candidate", approved=False,
+        ))
+        candidates.append(_project_path(path))
+    _write_project_audit(output / "project_merge_audit.json", {
+        "project": project.id,
+        "job": job_id,
+        "base": _project_path(reference),
+        "source": _project_path(object_cloud),
+        "candidates": candidates,
+        "approved": False,
+        "rule": "24 个立方体对称姿态均已评分和 ICP 精修。所有输出都是待审核候选；未验证的面、错误姿态或背景绝不自动写入已批准模型。",
+    })
+    if not candidates:
+        return "；已完成对齐评分，但没有通过导出的补细节候选"
+    return f"；已生成 {len(candidates)} 个对齐补细节候选，等待审核后再采用"
+
+
+def project_postprocess_summary(job_id: str) -> str:
+    """项目自动后处理不能让已完成的单次重建被标记为失败。"""
+    try:
+        return run_project_postprocess(job_id)
+    except Exception as exc:
+        root = job_dir(job_id)
+        with (root / "pipeline.log").open("a", encoding="utf-8") as log:
+            log.write(f"项目自动后处理失败（原始单次结果保留）：{exc}\n")
+        return "；项目自动处理未完成，原始单次结果和点云均已保留，可安全重试"
 
 
 def cudnn_library_dir() -> Path | None:
@@ -606,7 +1100,81 @@ def select_best_model(sparse_root: Path) -> tuple[Path, int, int, int]:
     return best[0], best[1], best[2], len(models)
 
 
+def probe_video(video: Path) -> dict:
+    """用 ffprobe 读视频流参数；失败返回空 dict（那就按老路老老实实转码）。
+
+    返回键：``width``/``height``/``fps``/``codec_name``/``pix_fmt``。
+    """
+    if shutil.which(settings.ffprobe_binary) is None:
+        return {}
+    try:
+        result = subprocess.run(
+            [
+                settings.ffprobe_binary, "-v", "error", "-select_streams", "v:0",
+                "-show_entries", "stream=width,height,avg_frame_rate,codec_name,pix_fmt",
+                "-of", "json", str(video),
+            ],
+            capture_output=True, text=True, check=False, timeout=30,
+        )
+        streams = json.loads(result.stdout).get("streams") or []
+    except Exception:
+        return {}
+    if not streams:
+        return {}
+    stream = streams[0]
+    numerator, _, denominator = str(stream.get("avg_frame_rate", "0/1")).partition("/")
+    try:
+        fps = float(numerator) / float(denominator or 1)
+    except ValueError:
+        fps = 0.0
+    return {
+        "width": int(stream.get("width") or 0),
+        "height": int(stream.get("height") or 0),
+        "fps": fps,
+        "codec_name": stream.get("codec_name", ""),
+        "pix_fmt": stream.get("pix_fmt", ""),
+    }
+
+
+def already_normalized(info: dict) -> bool:
+    """源视频是否已经是目标规格，不必再转一遍。
+
+    多转一轮不只是浪费时间：本项目素材有 10bit HEVC 的，转成 8bit H.264
+    是实打实的精度损失。规格已经对上就直接拿原文件去抽帧。
+    """
+    if not info:
+        return False
+    return (
+        info["width"] == settings.normalize_width
+        and info["height"] == settings.normalize_height
+        and abs(info["fps"] - settings.normalize_fps) < 0.01
+    )
+
+
 def normalize_video(video: Path, normalized: Path, root: Path) -> None:
+    # 源视频已经是目标分辨率/帧率就直接复用，不再转码（见 already_normalized 的说明）。
+    # 用硬链接而不是复制：同一文件系统下零拷贝、不占额外磁盘。
+    info = probe_video(video)
+    if already_normalized(info):
+        normalized.unlink(missing_ok=True)
+        try:
+            normalized.hardlink_to(video)
+        except OSError:
+            shutil.copy2(video, normalized)
+        with (root / "pipeline.log").open("a", encoding="utf-8") as log:
+            log.write(
+                f"源视频已是 {info['width']}x{info['height']}@{info['fps']:g} "
+                f"({info['codec_name']}/{info['pix_fmt']})，跳过转码，直接用它抽帧\n"
+            )
+        return
+    if info:
+        with (root / "pipeline.log").open("a", encoding="utf-8") as log:
+            log.write(
+                f"源视频 {info['width']}x{info['height']}@{info['fps']:g} "
+                f"({info['codec_name']}/{info['pix_fmt']})，转码为 "
+                f"{settings.normalize_width}x{settings.normalize_height}@{settings.normalize_fps}\n"
+            )
+
     video_filter = (
         "hwdownload,format=nv12,"
         f"scale={settings.normalize_width}:{settings.normalize_height},"
@@ -670,7 +1238,7 @@ def run_colmap_pipeline(job_id: str, gpu_enabled: bool) -> tuple[int, int]:
     normalized = root / "normalized_1080p30.mp4"
     frames.mkdir(exist_ok=True)
 
-    update_stage(job_id, 10, "FFmpeg 统一转码为 1080p30")
+    update_stage(job_id, 10, "检查视频规格（已是 1080p30 则跳过转码）")
     normalize_video(input_files[0], normalized, root)
     update_stage(job_id, 20, f"FFmpeg 按 {settings.frame_fps} FPS 抽取关键帧")
     extract_frames(normalized, frames, root)
@@ -764,9 +1332,16 @@ def count_dense_views(dense: Path) -> int:
 def mesh_and_export(job_id: str, root: Path, point_cloud_path: Path) -> None:
     """点云 → Poisson 网格 → GLB。正式流程与续跑共用。"""
     update_stage(job_id, 95, "Open3D 点云重建网格并导出 GLB")
+    source = point_cloud_path
+    job = store.get(job_id)
+    # 首段扫描直接从已分离的主体点云出模型。原始 fused.ply 未改动，可随时复核
+    # 或调整阈值后重新导出；后续补拍的单次模型保持原样，仅把清理点云用于候选融合。
+    if job.project_id and job.project_sequence == 1:
+        update_stage(job_id, 96, "项目内分离目标物体，首段模型不包含背景")
+        source = extract_project_object(job_id)
     with log_heartbeat(root):
         point_cloud_to_glb(
-            point_cloud_path,
+            source,
             result_file(job_id),
             voxel_size=settings.poisson_voxel_size,
             poisson_depth=settings.poisson_depth,
@@ -796,6 +1371,11 @@ def run_dense_stage(job_id: str, root: Path, dense: Path, registered: int) -> No
         "--workspace_path", str(dense),
         "--workspace_format", "COLMAP",
         "--PatchMatchStereo.geom_consistency", "true" if geom_consistency else "false",
+        # 资源用量：**CPU 用满，只压内存**。num_threads=-1 就是用满所有核；
+        # 要收的是 cache_size —— 它默认 32 GB，比这台机器 24 GB 物理内存还大，
+        # 会把内存吃千并触发 WSL 虚拟机的内存回收。
+        "--PatchMatchStereo.num_threads", str(settings.colmap_num_threads),
+        "--PatchMatchStereo.cache_size", str(settings.colmap_cache_size_gb),
     ]
     if settings.patch_match_max_image_size > 0:
         patch_match_command.extend(
@@ -823,6 +1403,14 @@ def run_dense_stage(job_id: str, root: Path, dense: Path, registered: int) -> No
             "--workspace_format", "COLMAP",
             "--output_path", str(point_cloud_file(job_id)),
             "--StereoFusion.min_num_pixels", str(settings.stereo_fusion_min_num_pixels),
+            "--StereoFusion.num_threads", str(settings.colmap_num_threads),
+            "--StereoFusion.check_num_images", str(settings.stereo_fusion_check_num_images),
+            # use_cache 默认是 0（关闭）—— 此时 COLMAP 会把**全部** 1325 张图的
+            # 深度图+法线图一次性读进内存（1325 x 16 MB ~= 21 GB），24 GB 的机器
+            # 装不下就会触发 WSL 内存回收，表现为 WSL 反复重启、终端连不上。
+            # 打开缓存把驻留量封在 cache_size 以内。
+            "--StereoFusion.use_cache", "1",
+            "--StereoFusion.cache_size", str(settings.colmap_cache_size_gb),
         ]
         + (
             ["--StereoFusion.max_image_size", str(settings.stereo_fusion_max_image_size)]
@@ -850,6 +1438,8 @@ def finish_job(job_id: str, stage: str) -> None:
         error=None,
     )
     persist_job(completed)
+    if completed.project_id:
+        projects.add_job(completed.project_id, completed)
 
 
 def fail_job(job_id: str, error: str) -> None:
@@ -883,19 +1473,20 @@ def resume_dense_reconstruction(job_id: str, resume_from: int = 0) -> None:
         total_frames = len(list(frames.glob("*.jpg"))) or registered
         fused = point_cloud_file(job_id)
         fusion_done = resume_from >= 95 and fused.exists() and fused.stat().st_size > 1_000_000
-        if fusion_done:
-            update_stage(
-                job_id,
-                95,
-                f"复用已有的 {fused.name}（{fused.stat().st_size / 1024 / 1024:.0f} MB），直接重建网格并导出 GLB",
-            )
-            mesh_and_export(job_id, root, fused)
-        else:
-            done = count_dense_depth_maps(dense)
-            update_stage(job_id, 75, f"续跑稠密重建（已有 {done} 个视角文件，已完成的视角会自动跳过）")
-            with pipeline_lock:
+        with pipeline_lock:
+            if fusion_done:
+                update_stage(
+                    job_id,
+                    95,
+                    f"复用已有的 {fused.name}（{fused.stat().st_size / 1024 / 1024:.0f} MB），直接重建网格并导出 GLB",
+                )
+                mesh_and_export(job_id, root, fused)
+            else:
+                done = count_dense_depth_maps(dense)
+                update_stage(job_id, 75, f"续跑稠密重建（已有 {done} 个视角文件，已完成的视角会自动跳过）")
                 run_dense_stage(job_id, root, dense, registered)
-        finish_job(job_id, f"处理完成（注册 {registered}/{total_frames} 张图像）")
+            note = project_postprocess_summary(job_id)
+        finish_job(job_id, f"处理完成（注册 {registered}/{total_frames} 张图像）{note}")
     except Exception as exc:
         fail_job(job_id, str(exc))
 
@@ -907,8 +1498,10 @@ def remesh_from_point_cloud(job_id: str) -> None:
         _, registered, _, _ = select_best_model(root / "sparse")
         frames = root / "frames"
         total_frames = len(list(frames.glob("*.jpg"))) or registered
-        mesh_and_export(job_id, root, point_cloud_file(job_id))
-        finish_job(job_id, f"处理完成（注册 {registered}/{total_frames} 张图像）")
+        with pipeline_lock:
+            mesh_and_export(job_id, root, point_cloud_file(job_id))
+            note = project_postprocess_summary(job_id)
+        finish_job(job_id, f"处理完成（注册 {registered}/{total_frames} 张图像）{note}")
     except Exception as exc:
         fail_job(job_id, str(exc))
 
@@ -930,9 +1523,56 @@ def run_reconstruction(job_id: str) -> None:
             update_stage(job_id, 1, "排队等待 GPU 资源")
         with pipeline_lock:
             registered, total_frames = run_colmap_pipeline(job_id, gpu_enabled=gpu_enabled)
-        finish_job(job_id, f"处理完成（注册 {registered}/{total_frames} 张图像）")
+            note = project_postprocess_summary(job_id)
+        finish_job(job_id, f"处理完成（注册 {registered}/{total_frames} 张图像）{note}")
     except Exception as exc:
         fail_job(job_id, str(exc))
+
+
+def _finish_legacy_project_jobs(job_ids: set[str]) -> None:
+    """兼容旧后端已启动的项目任务；只观察启动时仍在运行的这一批。"""
+    pending = set(job_ids)
+    while pending:
+        for job_id in tuple(pending):
+            try:
+                # 任务由另一台仍在运行的旧后端更新；不能使用本进程启动时缓存的
+                # Job，而必须每轮读它刚写入的 job.json。
+                job = Job.model_validate_json(
+                    (job_dir(job_id) / "job.json").read_text(encoding="utf-8")
+                )
+                store.register(job)
+            except (OSError, ValueError):
+                pending.discard(job_id)
+                continue
+            if job.status in (JobStatus.failed, JobStatus.queued, JobStatus.processing):
+                continue
+            pending.discard(job_id)
+            if job.status != JobStatus.completed or not point_cloud_file(job_id).is_file():
+                continue
+            # 旧后端的任务已经完成全部 COLMAP 写入；此时独占本服务的项目后处理，
+            # 既不改它的原始视频/稠密目录，也不会与 patch_match_stereo 并发。
+            with pipeline_lock:
+                note = project_postprocess_summary(job_id)
+            finish_job(job_id, f"{job.stage}{note}")
+        if pending:
+            threading.Event().wait(15)
+
+
+@app.on_event("startup")
+def watch_legacy_project_jobs() -> None:
+    """在无重启迁移期间，为旧 8000 后端的当前项目任务补上自动流程。"""
+    pending = {
+        job.id for job in store.list()
+        if job.project_id and job.project_sequence is None
+        and job.status in (JobStatus.queued, JobStatus.processing)
+    }
+    if not pending:
+        return
+    watcher = threading.Thread(
+        target=_finish_legacy_project_jobs,
+        args=(pending,), name="legacy-project-postprocess", daemon=True,
+    )
+    watcher.start()
 
 
 @app.get("/health")
@@ -940,16 +1580,91 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.post("/api/v1/jobs", response_model=Job, status_code=status.HTTP_202_ACCEPTED)
-async def create_job(
+@app.get("/api/v1/projects", response_model=list[Project])
+def list_projects() -> list[Project]:
+    return projects.list()
+
+
+@app.post("/api/v1/projects", response_model=Project, status_code=status.HTTP_201_CREATED)
+def create_project(payload: ProjectCreate) -> Project:
+    return projects.create(payload.name, payload.description)
+
+
+@app.get("/api/v1/projects/{project_id}", response_model=Project)
+def get_project(project_id: str) -> Project:
+    return projects.get(project_id)
+
+
+@app.patch("/api/v1/projects/{project_id}", response_model=Project)
+def patch_project(project_id: str, payload: ProjectPatch) -> Project:
+    changes = payload.model_dump(exclude_unset=True)
+    return projects.update(project_id, **changes) if changes else projects.get(project_id)
+
+
+@app.get("/api/v1/projects/{project_id}/jobs", response_model=list[Job])
+def list_project_jobs(project_id: str) -> list[Job]:
+    project = projects.get(project_id)
+    jobs = {job.id: job for job in store.list()}
+    return [with_eta(jobs[jid]) for jid in project.job_ids if jid in jobs]
+
+
+@app.get("/api/v1/projects/{project_id}/artifacts", response_model=list[Artifact])
+def list_project_artifacts(project_id: str) -> list[Artifact]:
+    return projects.get(project_id).artifacts
+
+
+@app.post(
+    "/api/v1/projects/{project_id}/artifacts",
+    response_model=Project,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_project_artifact(project_id: str, payload: ArtifactCreate) -> Project:
+    path = Path(payload.path).resolve()
+    storage_root = settings.storage_dir.resolve()
+    if storage_root not in path.parents or not path.is_file():
+        raise HTTPException(status_code=422, detail="产物必须是 storage/ 内已存在的文件")
+    # 存相对路径，避免项目索引依赖当前工作目录的绝对位置。
+    artifact = Artifact(
+        name=payload.name,
+        path=str(path.relative_to(Path.cwd().resolve())),
+        kind=payload.kind,
+        approved=payload.approved,
+    )
+    return projects.add_artifact(project_id, artifact)
+
+
+@app.get("/api/v1/projects/{project_id}/artifacts/{artifact_index}")
+def get_project_artifact(project_id: str, artifact_index: int) -> FileResponse:
+    artifacts = projects.get(project_id).artifacts
+    if artifact_index < 0 or artifact_index >= len(artifacts):
+        raise HTTPException(status_code=404, detail="产物不存在")
+    path = Path(artifacts[artifact_index].path).resolve()
+    storage_root = settings.storage_dir.resolve()
+    if storage_root not in path.parents or not path.is_file():
+        raise HTTPException(status_code=404, detail="产物文件不存在")
+    return FileResponse(path, media_type="model/gltf-binary", filename=path.name)
+
+
+async def _create_job(
     background_tasks: BackgroundTasks,
-    video: Annotated[UploadFile, File(description="待重建的视频文件")],
+    video: UploadFile,
+    project_id: str | None = None,
 ) -> Job:
+    project: Project | None = None
+    if project_id is not None:
+        project = projects.get(project_id)
     suffix = Path(video.filename or "").suffix.lower()
     if suffix not in settings.allowed_video_extensions:
         raise HTTPException(status_code=415, detail="不支持的视频格式")
 
     job = store.create(video.filename or f"input{suffix}")
+    if project_id:
+        # 上传时就固定序号；若用户连续上传多个视频，不能等前一个完成后再猜谁是首段。
+        job = store.update(
+            job.id,
+            project_id=project_id,
+            project_sequence=len(project.job_ids) + 1 if project is not None else None,
+        )
     destination = job_dir(job.id) / f"input{suffix}"
     destination.parent.mkdir(parents=True, exist_ok=True)
     size = 0
@@ -959,14 +1674,7 @@ async def create_job(
                 size += len(chunk)
                 if size > settings.max_upload_size_mb * 1024 * 1024:
                     destination.unlink(missing_ok=True)
-                    raise HTTPException(
-                        status_code=413,
-                        detail=(
-                            f"视频超过大小限制：上限 {settings.max_upload_size_mb / 1024:g} GB，"
-                            f"当前已接收 {size / 1024 / 1024 / 1024:.2f} GB。"
-                            "可通过 MODEL_API_MAX_UPLOAD_SIZE_MB 调整上限，或先用 ffmpeg 裁剪/压缩视频"
-                        ),
-                    )
+                    raise HTTPException(status_code=413, detail=f"视频超过大小限制：上限 {settings.max_upload_size_mb / 1024:g} GB")
                 output.write(chunk)
     except Exception:
         shutil.rmtree(job_dir(job.id), ignore_errors=True)
@@ -974,22 +1682,39 @@ async def create_job(
         raise
     finally:
         await video.close()
-
     try:
         validate_video(destination)
     except ValueError as exc:
         shutil.rmtree(job_dir(job.id), ignore_errors=True)
         store.remove(job.id)
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-
     persist_job(job)
+    if project_id:
+        projects.add_job(project_id, job)
     background_tasks.add_task(run_reconstruction, job.id)
     return job
 
 
+@app.post("/api/v1/jobs", response_model=Job, status_code=status.HTTP_202_ACCEPTED)
+async def create_job(
+    background_tasks: BackgroundTasks,
+    video: Annotated[UploadFile, File(description="待重建的视频文件")],
+) -> Job:
+    return with_eta(await _create_job(background_tasks, video))
+
+
+@app.post("/api/v1/projects/{project_id}/jobs", response_model=Job, status_code=status.HTTP_202_ACCEPTED)
+async def create_project_job(
+    project_id: str,
+    background_tasks: BackgroundTasks,
+    video: Annotated[UploadFile, File(description="项目中的视频任务")],
+) -> Job:
+    return with_eta(await _create_job(background_tasks, video, project_id))
+
+
 @app.get("/api/v1/jobs", response_model=list[Job])
 def list_jobs() -> list[Job]:
-    return store.list()
+    return [with_eta(job) for job in store.list()]
 
 
 @app.post("/api/v1/jobs/{job_id}/retry", response_model=Job, status_code=status.HTTP_202_ACCEPTED)
@@ -1009,6 +1734,8 @@ def retry_job(job_id: str, background_tasks: BackgroundTasks) -> Job:
         stage="等待处理",
         created_at=now,
         updated_at=now,
+        project_id=old_job.project_id,
+        project_sequence=old_job.project_sequence,
     )
     destination = job_dir(retry.id)
     destination.mkdir(parents=True, exist_ok=True)
@@ -1020,8 +1747,10 @@ def retry_job(job_id: str, background_tasks: BackgroundTasks) -> Job:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     persist_job(retry)
     store.register(retry)
+    if retry.project_id:
+        projects.add_job(retry.project_id, retry)
     background_tasks.add_task(run_reconstruction, retry.id)
-    return retry
+    return with_eta(retry)
 
 
 @app.post(
@@ -1052,7 +1781,7 @@ def resume_job(job_id: str, background_tasks: BackgroundTasks) -> Job:
     )
     persist_job(updated)
     background_tasks.add_task(resume_dense_reconstruction, job_id, resume_from)
-    return updated
+    return with_eta(updated)
 
 
 @app.post(
@@ -1079,7 +1808,7 @@ def remesh_job(job_id: str, background_tasks: BackgroundTasks) -> Job:
     )
     persist_job(updated)
     background_tasks.add_task(remesh_from_point_cloud, job_id)
-    return updated
+    return with_eta(updated)
 
 
 @app.delete("/api/v1/jobs/{job_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -1093,7 +1822,7 @@ def delete_job(job_id: str) -> None:
 
 @app.get("/api/v1/jobs/{job_id}", response_model=Job)
 def get_job(job_id: str) -> Job:
-    return store.get(job_id)
+    return with_eta(store.get(job_id))
 
 
 @app.get("/api/v1/jobs/{job_id}/result")

@@ -41,7 +41,7 @@ from pathlib import Path
 
 import numpy as np
 
-REPO = Path(__file__).resolve().parent.parent
+REPO = Path(__file__).resolve().parents[2]
 COLMAP = os.environ.get("MODEL_API_COLMAP_BINARY") or str(Path.home() / ".local/bin/colmap")
 FEATURE_TYPE = "ALIKED_N16ROT"
 MATCHER_TYPE = "ALIKED_BRUTEFORCE"

@@ -5,9 +5,9 @@
 dense/ 与 fused.ply。要处理第二个模型必须另开一份工作区，否则会覆盖已有成果。
 
 用法：
-    ./.venv/bin/python tools/build_dense_model.py --model 1
-    ./.venv/bin/python tools/build_dense_model.py --model 1 --max-image-size 960   # 快速验证
-    ./.venv/bin/python tools/build_dense_model.py --model 1 --no-geom-consistency  # 单遍，耗时减半
+    ./.venv/bin/python tools/pipeline/build_dense_model.py --model 1
+    ./.venv/bin/python tools/pipeline/build_dense_model.py --model 1 --max-image-size 960   # 快速验证
+    ./.venv/bin/python tools/pipeline/build_dense_model.py --model 1 --no-geom-consistency  # 单遍，耗时减半
 
 可重复运行：patch_match_stereo 会跳过 depth_maps 里已存在的视角，中断后直接重跑即可续上。
 """
@@ -23,14 +23,14 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from app.main import settings, subprocess_env  # noqa: E402
 
 POLL_SECONDS = 3.0
 
 
 def write_state(path: Path, **fields: object) -> None:
-    """写进度状态文件，供 tools/dense_status.py 与 ./start.sh status 读取。"""
+    """写进度状态文件，供 tools/diagnostics/project_check.py 与 ./start.sh status 读取。"""
     payload: dict[str, object] = {}
     if path.exists():
         try:
@@ -159,6 +159,10 @@ def main() -> None:
         "--workspace_path", str(dense),
         "--workspace_format", "COLMAP",
         "--PatchMatchStereo.geom_consistency", "true" if geom else "false",
+        # 与网页主流程保持一致：单个 COLMAP 作业用满可用 CPU，缓存上限
+        # 由 settings 控制，避免默认 32GB 在 24GB 主机上触发换页。
+        "--PatchMatchStereo.num_threads", str(settings.colmap_num_threads),
+        "--PatchMatchStereo.cache_size", str(settings.colmap_cache_size_gb),
     ]
     if max_size > 0:
         command += ["--PatchMatchStereo.max_image_size", str(max_size)]
@@ -181,6 +185,9 @@ def main() -> None:
             "--workspace_format", "COLMAP",
             "--output_path", str(fused),
             "--StereoFusion.min_num_pixels", str(settings.stereo_fusion_min_num_pixels),
+            "--StereoFusion.num_threads", str(settings.colmap_num_threads),
+            "--StereoFusion.use_cache", "1",
+            "--StereoFusion.cache_size", str(settings.colmap_cache_size_gb),
         ] + (
             ["--StereoFusion.max_image_size", str(settings.stereo_fusion_max_image_size)]
             if settings.stereo_fusion_max_image_size > 0 else []

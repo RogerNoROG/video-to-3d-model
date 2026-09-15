@@ -21,10 +21,10 @@
 
 用法：
     # 在稀疏点云上预演（快，用于验证算法）
-    ./.venv/bin/python tools/merge_models.py --source sparse
+    ./.venv/bin/python tools/fusion/merge_models.py --source sparse
 
-    # 稠密点云（等 tools/build_dense_model.py --model 1 跑完）
-    ./.venv/bin/python tools/merge_models.py --source dense
+    # 稠密点云（等 tools/pipeline/build_dense_model.py --model 1 跑完）
+    ./.venv/bin/python tools/fusion/merge_models.py --source dense
 """
 from __future__ import annotations
 
@@ -39,7 +39,7 @@ import numpy as np
 import open3d as o3d
 from scipy.spatial import cKDTree
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from app.convert import crop_outliers, keep_object_by_color  # noqa: E402
 
 DEFAULT_JOB = "e7f9f9e5d046490d93b34e4538bc9ef1"
@@ -80,6 +80,31 @@ def quaternion_to_rotation(quaternion: np.ndarray) -> np.ndarray:
         [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
         [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)],
     ])
+
+
+def read_camera_centers(path: Path) -> np.ndarray:
+    """读 images.bin 的**相机中心** C = -R^T t（与 :func:`read_sparse_cameras` 同一个解析循环）。
+
+    相机中心质心曾被当作「物体在哪儿」的粗略锚点，但实测**不可用**：老素材里
+    物体中心离它 1.247，而物体自己才 1.3 大。它的真正用途是限定「物体附近」的
+    范围，把房间的墙排除在后续处理之外。
+    """
+    data = path.read_bytes()
+    (count,) = struct.unpack_from("<Q", data, 0)
+    offset = 8
+    centers = np.empty((count, 3))
+    for index in range(count):
+        offset += 4
+        quaternion = np.frombuffer(data, dtype=np.float64, count=4, offset=offset)
+        offset += 32
+        tvec = np.frombuffer(data, dtype=np.float64, count=3, offset=offset)
+        offset += 24
+        centers[index] = -quaternion_to_rotation(quaternion).T @ tvec
+        offset += 4
+        offset = data.index(b"\x00", offset) + 1
+        (point_count,) = struct.unpack_from("<Q", data, offset)
+        offset += 8 + point_count * 24
+    return centers
 
 
 def gravity_up(images_path: Path) -> np.ndarray:
@@ -287,25 +312,39 @@ def build_initial_transform(rotation: np.ndarray, source: np.ndarray, target: np
 
 
 def icp_refine(
-    source: np.ndarray, target: np.ndarray, transform: np.ndarray, voxel: float
+    source: np.ndarray, target: np.ndarray, transform: np.ndarray, voxel: float,
+    threshold: float | None = None, allow_scale: bool = True,
 ) -> tuple[np.ndarray, float, float]:
-    """多尺度 ICP 精修（允许缩放，两段尺度本就不完全一致）。
+    """多尺度 ICP 精修。
 
     评分用 ``evaluate_registration`` 在**统一而且合理的阈值**下重算：
     若沿用最后一轮 ICP 的极紧阈值（voxel*0.5，物体尺寸的千分之几），
     即使是正确对齐，稀疏点云的噪声也会让 fitness 掉到 0，无法区分好坏。
+
+    ``threshold`` 是评分用的对应点上限；不传就取 ``voxel*2``。
+    ⚠️ 它必须与**实际点间距**匹配：把点云降到 6 万点时点间距约 0.01，
+    若还用 0.005 当阈值，即使完美对齐 fitness 也只有 0.43，排序就失去意义了。
+
+    ``allow_scale`` 默认 True（两段尺度本就不完全一致）。但**初始对齐较差时
+    它会塔缩**：把源点云缩成一个点，得到 fitness=1.0 / rmse=1e-18 / 尺度≈1e-24
+    的退化解。所以这里加了尺度合理性检查，塌缩的直接判 0 分。
     """
     src = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(source))
     tgt = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(target))
-    estimation = o3d.pipelines.registration.TransformationEstimationPointToPoint(True)
+    estimation = o3d.pipelines.registration.TransformationEstimationPointToPoint(allow_scale)
     for distance, iterations in ((voxel * 3, 60), (voxel * 1.2, 100), (voxel * 0.5, 150)):
         result = o3d.pipelines.registration.registration_icp(
             src, tgt, distance, transform, estimation,
             o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=iterations),
         )
         transform = result.transformation
-    evaluation = o3d.pipelines.registration.evaluate_registration(src, tgt, voxel * 2, transform)
-    return transform, float(evaluation.fitness), float(evaluation.inlier_rmse)
+    score_threshold = voxel * 2 if threshold is None else threshold
+    evaluation = o3d.pipelines.registration.evaluate_registration(
+        src, tgt, score_threshold, transform
+    )
+    scale = float(np.cbrt(abs(np.linalg.det(np.asarray(transform)[:3, :3]))))
+    fitness = float(evaluation.fitness) if 0.5 <= scale <= 2.0 else 0.0
+    return transform, fitness, float(evaluation.inlier_rmse)
 
 
 def generate_initial_candidates(
@@ -564,12 +603,15 @@ def merge_and_export(
     return merged
 
 
-def mesh_merged(ply_path: Path, glb_path: Path) -> None:
+def mesh_merged(ply_path: Path, glb_path: Path, depth: int = 9) -> None:
     """把合并后的点云跑 Poisson 出 GLB（直接复用正式流程的转换函数）。
 
     这里是红/蓝两色的诊断点云，所以出来的 GLB 也能直接看接缝：
     配准正确时两种颜色应各自覆盖箱体不同区域；配错时会出现
     一块区域红蓝重叠（双层面）而另一块区域两种颜色都没有。
+
+    ``depth`` 调小可让 GLB 小得多（depth 9 在 1.3 大的物体上要 200~300 MB，
+    浏览器里很慢；目视挑选姿态用 depth 7 就够，约 30 MB）。
     """
     from app.convert import point_cloud_to_glb
 
@@ -582,7 +624,7 @@ def mesh_merged(ply_path: Path, glb_path: Path) -> None:
         min_component_ratio=0.02,
         density_quantile=0.02,
         object_warmth=-1.0,           # 上游已经按颜色提纯
-        poisson_max_depth=9,
+        poisson_max_depth=depth,
     )
 
 

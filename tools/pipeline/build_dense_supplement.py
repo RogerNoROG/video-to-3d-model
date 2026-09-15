@@ -10,14 +10,14 @@
 
 前提
 ----
-- 新模型是在**同一个坐标系**下增量注册出来的（tools/register_supplement.py），
+- 新模型是在**同一个坐标系**下增量注册出来的（tools/pipeline/register_supplement.py），
   旧图像位姿一点没动 —— 否则旧深度图不能复用
 - 相机内参没变（同相机、同分辨率）。软链接时要顺手核对图像名一一对应
 
 用法
 ----
-    ./.venv/bin/python tools/build_dense_supplement.py --job <任务id>
-    ./.venv/bin/python tools/build_dense_supplement.py --job <任务id> --no-geom-consistency
+    ./.venv/bin/python tools/pipeline/build_dense_supplement.py --job <任务id>
+    ./.venv/bin/python tools/pipeline/build_dense_supplement.py --job <任务id> --no-geom-consistency
 """
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ import threading
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from app.main import settings, subprocess_env  # noqa: E402
 
 POLL_SECONDS = 5.0
@@ -145,7 +145,9 @@ def main() -> None:
     print("\n[3/4] patch_match_stereo ...", flush=True)
     command = [settings.colmap_binary, "patch_match_stereo",
                "--workspace_path", str(dense), "--workspace_format", "COLMAP",
-               "--PatchMatchStereo.geom_consistency", "true" if geom else "false"]
+               "--PatchMatchStereo.geom_consistency", "true" if geom else "false",
+               "--PatchMatchStereo.num_threads", str(settings.colmap_num_threads),
+               "--PatchMatchStereo.cache_size", str(settings.colmap_cache_size_gb)]
     if max_size > 0:
         command += ["--PatchMatchStereo.max_image_size", str(max_size)]
     total = total_views * (2 if geom else 1)
@@ -164,14 +166,17 @@ def main() -> None:
     run([settings.colmap_binary, "stereo_fusion",
          "--workspace_path", str(dense), "--workspace_format", "COLMAP",
          "--output_path", str(fused),
-         "--StereoFusion.min_num_pixels", str(settings.stereo_fusion_min_num_pixels)]
+         "--StereoFusion.min_num_pixels", str(settings.stereo_fusion_min_num_pixels),
+         "--StereoFusion.num_threads", str(settings.colmap_num_threads),
+         "--StereoFusion.use_cache", "1",
+         "--StereoFusion.cache_size", str(settings.colmap_cache_size_gb)]
         + (["--StereoFusion.max_image_size", str(settings.stereo_fusion_max_image_size)]
            if settings.stereo_fusion_max_image_size > 0 else []),
         root, log_path, "stereo_fusion")
 
     size_mb = fused.stat().st_size / 1024 / 1024
     print(f"\n完成 -> {fused}（{size_mb:.0f} MB）")
-    print("下一步：用 tools/merge_models.py 重新合并（A 段换成这个更完整的点云），"
+    print("下一步：用 tools/fusion/merge_models.py 重新合并（A 段换成这个更完整的点云），"
           "再走立方体对齐 + 清理链")
 
 

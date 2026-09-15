@@ -25,6 +25,11 @@ BACKEND_LOG="logs/backend.log"
 FRONTEND_LOG="logs/frontend.log"
 BACKEND_PID="logs/backend.pid"
 FRONTEND_PID="logs/frontend.pid"
+# 当前正在处理的任务由旧后端持有时，不能重启它，否则会中断 COLMAP。
+# 8001 是可独立更新的项目 API：网页从这里读取 ETA、上传后续视频和执行自动对齐；
+# 已经在 8000 上运行的任务不受影响，两者共享 storage/。
+ETA_BACKEND_LOG="logs/eta-backend.log"
+ETA_BACKEND_PID="logs/eta-backend.pid"
 
 export PATH="$HOME/.local/bin:$PATH"
 export MODEL_API_COLMAP_BINARY="$HOME/.local/bin/colmap"
@@ -32,6 +37,15 @@ export MODEL_API_USE_GPU=true
 export MODEL_API_PREFER_CUDA=true
 export MODEL_API_ALLOW_CPU_FALLBACK=false
 export MODEL_API_FEATURE_EXTRACTOR=ALIKED_N16ROT
+# 单个 COLMAP 稠密任务使用全部核心；缓存固定在可用内存范围内，避免默认 32GB
+# 缓存触发换页反而让 CPU 空转。需要为别的程序预留核心时可在启动前覆盖这两个变量。
+export MODEL_API_COLMAP_NUM_THREADS="${MODEL_API_COLMAP_NUM_THREADS:--1}"
+export MODEL_API_COLMAP_CACHE_SIZE_GB="${MODEL_API_COLMAP_CACHE_SIZE_GB:-8}"
+
+# 抽帧率。它同时决定重建规模和耗时（稠密约 23 秒/视角/遍，开 geom_consistency 跑两遍，
+# 所以总时长 ≈ 帧数 × 2 × 23 秒）。默认 3 与原始素材一致；长视频可用环境变量覆盖：
+#   MODEL_API_FRAME_FPS=1 ./start.sh restart
+export MODEL_API_FRAME_FPS="${MODEL_API_FRAME_FPS:-3}"
 
 detach() {  # detach <logfile> <command...>
   local log="$1"; shift
@@ -46,7 +60,11 @@ alive() {  # alive <pidfile> -> 0 存活 / 1 不存在或已死
   [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
 }
 
-# 独立稠密构建（tools/build_dense_model.py）跑在各自的会话里，与后端无关。
+listening() {  # listening <port> -> 0 表示已有服务监听，避免误重启正在跑的建模后端
+  ss -ltn "sport = :$1" 2>/dev/null | grep -q LISTEN
+}
+
+# 独立稠密构建（tools/pipeline/build_dense_model.py）跑在各自的会话里，与后端无关。
 # 它们各自有一个 logs/dense_model*.pid，且会话号(SID)等于该 python 进程的 PID。
 # 收集这些会话号，用于在 stop 时**避免误杀**它们正在跑的子 colmap。
 dense_build_pids() {
@@ -81,18 +99,31 @@ stop_colmap_except_dense() {
 }
 
 start() {
-  if alive "$BACKEND_PID"; then
+  if listening 8000; then
+    echo "后端端口 8000 已有服务监听；保留现有建模进程"
+  elif alive "$BACKEND_PID"; then
     echo "后端已在运行 (pid $(cat "$BACKEND_PID"))"
   else
     detach "$BACKEND_LOG" ./.venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 \
       > "$BACKEND_PID"
     echo "后端已启动 (pid $(cat "$BACKEND_PID"))，日志 $BACKEND_LOG"
   fi
-  if alive "$FRONTEND_PID"; then
+  if listening 5500; then
+    echo "前端端口 5500 已有服务监听；保留现有网页服务"
+  elif alive "$FRONTEND_PID"; then
     echo "前端已在运行 (pid $(cat "$FRONTEND_PID"))"
   else
     detach "$FRONTEND_LOG" python3 -m http.server 5500 > "$FRONTEND_PID"
     echo "前端已启动 (pid $(cat "$FRONTEND_PID")): http://localhost:5500/video_upload.html"
+  fi
+  if listening 8001; then
+    echo "ETA API 端口 8001 已有服务监听"
+  elif alive "$ETA_BACKEND_PID"; then
+    echo "ETA API 已在运行 (pid $(cat "$ETA_BACKEND_PID"))"
+  else
+    detach "$ETA_BACKEND_LOG" ./.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8001 \
+      > "$ETA_BACKEND_PID"
+    echo "ETA API 已启动 (pid $(cat "$ETA_BACKEND_PID"))"
   fi
   # 后端冷启动约 2-3 秒，轮询等待而不是 sleep 固定时长
   for _ in $(seq 1 40); do
@@ -114,12 +145,15 @@ stop() {
   if alive "$FRONTEND_PID"; then
     kill "$(cat "$FRONTEND_PID")" 2>/dev/null || true
   fi
+  if alive "$ETA_BACKEND_PID"; then
+    kill "$(cat "$ETA_BACKEND_PID")" 2>/dev/null || true
+  fi
   # 关键：uvicorn 优雅退出**不会**杀死 BackgroundTasks 起的子进程，colmap 会变成孤儿
   # 继续跑，与下一次启动的 colmap 抢 GPU、抢同一批输出文件。必须显式清掉。
-  # 但要避开 tools/build_dense_model.py 起的 colmap —— 那是另开的长期任务，
+  # 但要避开 tools/pipeline/build_dense_model.py 起的 colmap —— 那是另开的长期任务，
   # 一刀切 pkill 会把几小时的稠密重建打掉。
   stop_colmap_except_dense
-  rm -f "$BACKEND_PID" "$FRONTEND_PID"
+  rm -f "$BACKEND_PID" "$FRONTEND_PID" "$ETA_BACKEND_PID"
   echo "已停止。产物保留在 storage/<job_id>/，重启后用 ./start.sh restart 自动续跑。"
 }
 
@@ -171,6 +205,11 @@ status() {
   else
     echo "前端    : 未运行"
   fi
+  if alive "$ETA_BACKEND_PID"; then
+    printf 'ETA API : 运行中 (pid %s)  %s\n' "$(cat "$ETA_BACKEND_PID")" "$(curl -fsS http://127.0.0.1:8001/health 2>/dev/null || echo '端口未响应')"
+  else
+    echo "ETA API : 未运行"
+  fi
   echo -n "colmap  : "
   local n; n=$(pgrep -cf 'colmap patch_match_stereo')
   if [ "${n:-0}" -eq 0 ]; then
@@ -192,11 +231,11 @@ for j in jobs[:3]:
     print("任务    : %-10s %3d%%  %s  (%s)" % (
         j.get("status", ""), j.get("progress", 0), j.get("stage", "")[:58], j.get("id", "")[:8]))'
 
-  # 独立稠密构建（tools/build_dense_model.py）不属于后端任务，得单独报
+  # 独立稠密构建（tools/pipeline/build_dense_model.py）不属于后端任务，得单独报
   if [ -x ./.venv/bin/python ]; then
-    ./.venv/bin/python tools/dense_status.py 2>/dev/null || true
+    ./.venv/bin/python tools/diagnostics/project_check.py status 2>/dev/null || true
   else
-    python3 tools/dense_status.py 2>/dev/null || true
+    python3 tools/diagnostics/project_check.py status 2>/dev/null || true
   fi
 }
 
@@ -218,4 +257,3 @@ case "${1:-start}" in
   stop-dense) stop_dense ;;
   *) echo "用法: $0 [start|stop|status|watch|restart|resume|stop-dense]" >&2; exit 2 ;;
 esac
-

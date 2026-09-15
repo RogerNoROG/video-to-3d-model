@@ -35,7 +35,7 @@ import open3d as o3d
 from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import connected_components
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from app.convert import point_cloud_to_glb, write_glb  # noqa: E402
 
 
@@ -53,7 +53,12 @@ def count_boundary_edges(mesh: o3d.geometry.TriangleMesh) -> int:
 def fill_boundary_holes(
     mesh: o3d.geometry.TriangleMesh, max_hole_edges: int = 0
 ) -> o3d.geometry.TriangleMesh:
-    """补上所有边界开口（``max_hole_edges>0`` 时只补边数不超过它的开口）。"""
+    """补上边界开口。
+
+    ``max_hole_edges == -1`` 时保留所有边界。这适用于带贯穿孔、槽口的物体：
+    边界环本身可能就是需要保留的真实特征，不能被自动补成扇面。
+    ``0`` 仍保留原有语义，即补全部开口；正数只补不超过该边数的开口。
+    """
     vertices = np.asarray(mesh.vertices)
     triangles = np.asarray(mesh.triangles)
     colors = np.asarray(mesh.vertex_colors) if mesh.has_vertex_colors() else None
@@ -67,6 +72,9 @@ def fill_boundary_holes(
     border_sorted = sorted_edges[is_border]
     if len(border_directed) == 0:
         print("[finish] 没有边界边，网格已封闭")
+        return mesh
+    if max_hole_edges < 0:
+        print(f"[finish] 保留 {len(border_directed):,} 条边界边（不自动补洞，避免封堵真实孔槽）")
         return mesh
 
     nodes: dict[int, int] = {}
@@ -185,10 +193,18 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", required=True, help="输入点云 PLY")
     parser.add_argument("--output", required=True, help="输出成品 GLB")
+    parser.add_argument(
+        "--rough-input",
+        default="",
+        help="复用已完成的 Poisson 粗网格（GLB），跳过 Poisson 阶段；仍会执行盒夹/平滑/导出。",
+    )
     parser.add_argument("--depth", type=int, default=10, help="Poisson 深度上限")
     parser.add_argument("--density-quantile", type=float, default=0.005)
     parser.add_argument("--smooth-iterations", type=int, default=3, help="Taubin 迭代次数，0=不平滑")
-    parser.add_argument("--max-hole-edges", type=int, default=0, help="只补不超过这么多条边的开口，0=全补")
+    parser.add_argument(
+        "--max-hole-edges", type=int, default=0,
+        help="只补不超过这么多条边的开口；0=全补，-1=完全不补（保留贯穿孔/槽口）",
+    )
     parser.add_argument(
         "--pre-voxel", type=float, default=0.0,
         help="先按这个体素边长下采样（体素内取平均）来降噪，0=不降噪。"
@@ -215,30 +231,36 @@ def main() -> None:
     started = time.monotonic()
     source = Path(args.input)
     target = Path(args.output)
-    rough = target.with_suffix(".rough.glb")
+    supplied_rough = Path(args.rough_input) if args.rough_input else None
+    rough = supplied_rough or target.with_suffix(".rough.glb")
 
-    print(f"[finish] Poisson（深度上限 {args.depth}）...")
-    if args.pre_voxel > 0:
-        raw = o3d.io.read_point_cloud(str(source))
-        before = len(raw.points)
-        smoothed = raw.voxel_down_sample(args.pre_voxel)
-        print(f"[finish] 体素降噪 {args.pre_voxel:.4f}: {before:,} -> {len(smoothed.points):,} 点")
-        source = target.with_suffix(".pre.ply")
-        o3d.io.write_point_cloud(str(source), smoothed, write_ascii=False)
-        del raw, smoothed
+    if supplied_rough:
+        if not rough.is_file():
+            raise SystemExit(f"--rough-input 不存在: {rough}")
+        print(f"[finish] 复用已有 Poisson 粗网格：{rough}")
+    else:
+        print(f"[finish] Poisson（深度上限 {args.depth}）...")
+        if args.pre_voxel > 0:
+            raw = o3d.io.read_point_cloud(str(source))
+            before = len(raw.points)
+            smoothed = raw.voxel_down_sample(args.pre_voxel)
+            print(f"[finish] 体素降噪 {args.pre_voxel:.4f}: {before:,} -> {len(smoothed.points):,} 点")
+            source = target.with_suffix(".pre.ply")
+            o3d.io.write_point_cloud(str(source), smoothed, write_ascii=False)
+            del raw, smoothed
 
-    point_cloud_to_glb(
-        source,
-        rough,
-        outlier_percentile=0.0,
-        sor_neighbors=0,
-        sor_std_ratio=0.0,
-        min_component_ratio=0.01,
-        density_quantile=args.density_quantile,
-        object_warmth=-1.0,
-        poisson_max_depth=args.depth,
-        orient_normals_max_points=5_000_000,
-    )
+        point_cloud_to_glb(
+            source,
+            rough,
+            outlier_percentile=0.0,
+            sor_neighbors=0,
+            sor_std_ratio=0.0,
+            min_component_ratio=0.01,
+            density_quantile=args.density_quantile,
+            object_warmth=-1.0,
+            poisson_max_depth=args.depth,
+            orient_normals_max_points=5_000_000,
+        )
 
     mesh = o3d.io.read_triangle_mesh(str(rough))
     print(f"[finish] Poisson 输出 {len(mesh.vertices):,} 顶点 / {len(mesh.triangles):,} 三角面  "
@@ -269,7 +291,7 @@ def main() -> None:
     write_glb(mesh, target)
     print(f"[finish] -> {target.name}  {target.stat().st_size / 1024 / 1024:.0f} MB  "
           f"总耗时 {time.monotonic() - started:.0f}s")
-    if not args.keep_temp:
+    if not args.keep_temp and not supplied_rough:
         rough.unlink(missing_ok=True)
         if args.pre_voxel > 0:
             target.with_suffix(".pre.ply").unlink(missing_ok=True)
