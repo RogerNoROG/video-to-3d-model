@@ -30,7 +30,7 @@ FastAPI 服务 (app/main.py)
 | --- | --- | --- |
 | `app/main.py` | API、上传校验、任务状态、COLMAP 调度、项目/产物索引 | 网页上传、查询、续跑、重新出网格 |
 | `app/convert.py` | 点云清理、法线处理、Poisson、颜色转移、GLB 写入 | 被 API 与网格工具共用；不直接维护项目状态 |
-| `video_upload.html` | 项目列表、任务上传、候选预览与下载 | 本地展示页 |
+| `video_upload.html` | 项目与任务上传、候选预览与下载、产物审核（批准/撤回）、AI 助手（OpenAI 兼容） | 本地展示页 |
 | `start.sh` | 持久启动/停止/状态查看；隔离长任务会话 | 本机日常入口 |
 | `storage/` | 视频、帧、COLMAP 中间产物、点云、GLB、审计 JSON | 所有可恢复工作数据；不作为代码目录 |
 
@@ -60,6 +60,32 @@ FastAPI 服务 (app/main.py)
 打开 <http://localhost:5500/video_upload.html>，API 文档位于 <http://localhost:8000/docs>。
 
 若当前终端的隔离策略会在会话结束时回收监听进程，请在自己的终端运行上述命令；`start.sh` 会使用独立会话保证正常关闭 VS Code 终端后长任务仍可继续。
+
+## 网页结构
+
+```text
+第一行   项目（选择 / 新建 / 项目卡片）        导入视频
+第二行   AI 助手                              视频任务
+第三行   当前模型展示（含「模型版本」侧栏）
+底部     设置
+```
+
+- 项目 API 与任务主链**统一在 8000**（原先另有 8001 的 ETA API，已合并回来），网页不再需要第二个端口。
+- 每个模型卡片下方有 **「批准为基准」/「撤回批准」**（`PATCH /api/v1/projects/{id}/artifacts/{index}`）。
+  批准是**互斥**的：设某条为批准时会同时撤回其它条目，保证「已批准基准」唯一；
+  审核阶段只允许改批准状态，路径与名称不可篡改。
+- **AI 助手**使用 OpenAI 兼容接口。底部「设置」里填接口地址、API Key 与可选的模型名，
+  保存在浏览器 `localStorage`；聊天的请求经本机后端 `POST /api/v1/assistant/chat` 转发，
+  这样既避开第三方接口的浏览器跨域限制，密钥也不会写进任何项目文件。
+- 助手**能读项目本身的数据**，不是单纯的聊天转发：
+  - 每次请求自动附带一份**项目快照**：项目列表、每个视频任务的状态/进度/阶段、
+    全部产物及其批准状态、文件大小与路径（相当于代码聊天框里的仓库摘要）；
+  - 另外给一组**只读工具**（OpenAI function calling），它可以按需再查：
+    `list_projects`、`get_project`、`inspect_mesh`（顶点数/三角面数/边界边/包围盒/中心）、
+    `list_storage`、`read_storage_json`（各项审计 JSON）；
+  - 工具**全部限制在 `storage/` 内、且不写任何文件** —— 助手不能批准候选、不能改模型、
+    也不能碰 storage/ 之外的路径；
+  - 回复下方会列出它实际调用过的工具与参数，方便核对它是否真在“看数据”。
 
 ## 主流程
 
@@ -169,14 +195,24 @@ GET   /api/v1/projects/{id}/jobs
 GET   /api/v1/projects/{id}/artifacts
 POST  /api/v1/projects/{id}/jobs       multipart: video=<file>
 POST  /api/v1/projects/{id}/artifacts  {name, path, approved}
+PATCH /api/v1/projects/{id}/artifacts/{index}  {approved}   人工审核结论（互斥）
+POST  /api/v1/assistant/chat           {endpoint, api_key, model, project_id, messages}
 ```
+
+`PATCH .../artifacts/{index}` 只改批准状态：设为 true 时会同时撤回其它条目，所以
+「已批准基准」始终唯一。
+
+`POST /api/v1/assistant/chat` 是 AI 助手的入口：密钥只在这一次请求里透传、不落盘；
+后端会注入项目快照并执行**只读工具循环**（最多 5 轮），返回 `{content, tool_calls}`，
+其中 `tool_calls` 记录了模型实际读取过哪些项目数据。
 
 旧的 `/api/v1/jobs`、重试、续跑、重网格与结果下载接口保持兼容。未指定项目的上传会显示在“未归档任务”。
 
 ## 验证修改
 
 ```bash
-./.venv/bin/python -m py_compile app/main.py app/convert.py tools/*.py
+# ⚠️ tools/ 下的工具已按用途分到子目录，tools/*.py 匹配不到任何文件（会返回非零码）
+./.venv/bin/python -m py_compile app/*.py $(find tools -name "*.py")
 ./.venv/bin/python tools/diagnostics/project_check.py --help
 ./.venv/bin/python tools/refinement/model_refinement.py --help
 git diff --check

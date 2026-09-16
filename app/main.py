@@ -424,6 +424,22 @@ def reconcile_project_index() -> None:
         path = candidate_dir / f"candidate_{index}.glb"
         if path.exists() and not any(item.path == str(path) for item in candidates):
             candidates.append(Artifact(name=f"新视频候选合并 {index}", path=str(path), approved=False))
+    # 兼容 2026-09-16 首次自动补拍的历史输出。那次子进程以任务目录为 cwd，
+    # 相对的 storage/... 被解析成了 <job>/storage/...；文件本身有效，只是索引
+    # 原先找不到它们。后续任务会走 run_project_postprocess 的绝对输出路径。
+    legacy_job_id = "a0769748882b4d569e4114a7dd48de47"
+    legacy_dir = (
+        settings.storage_dir / legacy_job_id / "storage" / "yellow-cube" / "automation" / legacy_job_id
+    )
+    for index in (1, 2, 3):
+        path = legacy_dir / f"candidate_{index}.glb"
+        if path.exists() and not any(item.path == str(path) for item in candidates):
+            candidates.append(Artifact(
+                name=f"补拍对齐候选 {index} · 1000059278_1080p30_10bit.mp4",
+                path=str(path),
+                kind="alignment-candidate",
+                approved=False,
+            ))
     six_face = settings.storage_dir / "yellow-cube" / "six-face-v1" / "final-v3" / "merged_six_face_depth9.glb"
     if six_face.exists() and not any(item.path == str(six_face) for item in candidates):
         candidates.append(Artifact(
@@ -490,6 +506,32 @@ class ArtifactCreate(BaseModel):
     path: str = Field(min_length=1)
     kind: str = Field(default="model", max_length=40)
     approved: bool = False
+
+
+class ArtifactPatch(BaseModel):
+    """人工审核结论：只改批准状态，不允许改路径或名称。"""
+
+    approved: bool
+
+
+class AssistantMessage(BaseModel):
+    role: str = Field(max_length=32)
+    content: str = Field(max_length=20000)
+
+
+class AssistantChatRequest(BaseModel):
+    """网页 AI 助手的一次请求。
+
+    接口地址与密钥由网页从本机 localStorage 读出来随请求带上：
+    密钥只在这一次请求里透传（不落盘、不进项目文件），而转发由本机后端完成，
+    可以避开第三方接口的浏览器跨域限制。
+    """
+
+    endpoint: str = Field(min_length=1, max_length=500)
+    api_key: str = Field(default="", max_length=500)
+    model: str = Field(default="", max_length=200)
+    project_id: str = Field(default="", max_length=80)
+    messages: list[AssistantMessage] = Field(min_length=1, max_length=40)
 
 
 def job_dir(job_id: str) -> Path:
@@ -739,7 +781,9 @@ def run_project_postprocess(job_id: str) -> str:
         ))
         return "；已分离首段主体，原始背景结果已保留作追溯"
 
-    output = settings.storage_dir / project.id / "automation" / job_id
+    # run_command 以任务目录为 cwd；输出必须绝对化，防止在任务目录内再创建一层
+    # storage/，并确保候选可被下面的项目索引立即登记。
+    output = (settings.storage_dir / project.id / "automation" / job_id).resolve()
     output.mkdir(parents=True, exist_ok=True)
     update_stage(job_id, 99, "项目内对齐既有模型并生成补细节候选")
     command = [
@@ -1631,6 +1675,290 @@ def create_project_artifact(project_id: str, payload: ArtifactCreate) -> Project
         approved=payload.approved,
     )
     return projects.add_artifact(project_id, artifact)
+
+
+@app.patch("/api/v1/projects/{project_id}/artifacts/{artifact_index}", response_model=Project)
+def patch_project_artifact(
+    project_id: str, artifact_index: int, payload: ArtifactPatch
+) -> Project:
+    """人工审核后写入批准状态。
+
+    项目语义是「只有一个已批准基准」：把某一条设为批准时会同时撤回其它条目，
+    这样网页上的「已批准基准模型」始终唯一，候选也不会互相争抢基准位。
+    只允许改 approved —— 路径与名称由登记时决定，审核阶段不允许篡改。
+    """
+    project = projects.get(project_id)
+    if artifact_index < 0 or artifact_index >= len(project.artifacts):
+        raise HTTPException(status_code=404, detail="产物不存在")
+    updated = [
+        artifact.model_copy(
+            update={"approved": payload.approved if index == artifact_index else False}
+        )
+        for index, artifact in enumerate(project.artifacts)
+    ]
+    return projects.update(project_id, artifacts=updated)
+
+
+# ---------------------------------------------------------------- AI 助手
+# 助手要能“看项目”，所以后端给它两样东西：
+#   1. 每次请求都附一份项目快照（项目/产物/任务/已批准基准），相当于代码聊天框的仓库摘要；
+#   2. 一组**只读**工具，模型可以按需再查（列目录、数几何、读审计 JSON）。
+# 工具全部限制在 storage/ 内且不写任何文件。
+
+ASSISTANT_TOOLS: list[dict] = [
+    {"type": "function", "function": {
+        "name": "list_projects", "description": "列出全项目及各自的模型数与任务数",
+        "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {
+        "name": "get_project", "description": "读取一个项目的全部产物（名称/路径/类型/批准状态/文件大小）与视频任务状态",
+        "parameters": {"type": "object", "properties": {
+            "project_id": {"type": "string", "description": "项目 ID"}}, "required": ["project_id"]}}},
+    {"type": "function", "function": {
+        "name": "inspect_mesh", "description": "读取 storage/ 下某个 GLB/PLY 的几何统计：点数/顶点数/三角面数/边界边数/包围盒/中心",
+        "parameters": {"type": "object", "properties": {
+            "path": {"type": "string", "description": "storage/ 下的相对路径"}}, "required": ["path"]}}},
+    {"type": "function", "function": {
+        "name": "list_storage", "description": "列出 storage/ 下某个目录的内容（审计产物、中间点云、日志通常在这里）",
+        "parameters": {"type": "object", "properties": {
+            "path": {"type": "string", "description": "storage/ 下的相对目录"}}, "required": ["path"]}}},
+    {"type": "function", "function": {
+        "name": "read_storage_json", "description": "读取 storage/ 下的审计 JSON（如 merge_two_jobs.json、*_audit.json、fill_report.json）",
+        "parameters": {"type": "object", "properties": {
+            "path": {"type": "string"},
+            "max_chars": {"type": "integer", "description": "最多返回多少字符，默认 4000"}},
+            "required": ["path"]}}},
+]
+
+ASSISTANT_RULES = """\
+你在一个本地摄影测量项目（FastAPI + COLMAP + Open3D 的“video-to-3d-model”）里充当助手的角色。
+
+项目要点（回答时请遵守）：
+- 一个“项目”下挂多个视频任务，每个任务产出 fused.ply 与 model.glb；项目产物（artifacts）才是交付物。
+- **已批准基准永远唯一**：批准某条产物时会同时撤回其它条目。任何候选都不会自动覆盖已批准模型。
+- 目录约定：storage/<job_id>/ 为单次任务中间产物（frames、sparse/、dense/、fused.ply、model.glb）；
+  storage/yellow-cube/six-face-v1/ 下的子目录是各类审计与候选（orientation/、*-repair-v1/、*-fill-*/ 等）。
+- 木块是近正方体，存在 24 重对称歧义：**fitness 与最近邻距离分不出姿态**，必须靠凹槽/圆孔
+  落在同一物理面来目视判定。不要仅凭数值高就断言姿态正确。
+- “局部修补”的正当做法是只取有真实观测证据的部分（按棱 repair_cube_edges.py / 按面
+  extract_verified_face_repair.py），不得创建顶点或外推平面；孔、凹槽、棱不可被通用补洞处理。
+
+工作方式：
+- 先用给定工具查清事实再回答；不确定就说不确定，不要编造路径或数字。
+- 引用数字时说明它来自哪个文件或工具调用。
+- 回答用中文，简洁、直说结论，必要时给可执行命令。
+"""
+
+
+def _storage_path(raw: str) -> Path:
+    """把用户/模型给的路径限制到 storage/ 之内（只读）。"""
+    root = settings.storage_dir.resolve()
+    candidate = Path(raw)
+    path = (candidate if candidate.is_absolute() else Path.cwd() / candidate).resolve()
+    if path != root and root not in path.parents:
+        raise HTTPException(status_code=422, detail=f"只允许访问 storage/ 内的路径：{raw}")
+    return path
+
+
+def _artifact_facts(artifact: Artifact) -> dict:
+    path = _storage_path(artifact.path)
+    exists = path.is_file()
+    return {
+        "name": artifact.name, "path": artifact.path, "kind": artifact.kind,
+        "approved": artifact.approved, "exists": exists,
+        "size_mb": round(path.stat().st_size / 2**20, 1) if exists else None,
+    }
+
+
+def _status_text(status: object) -> str:
+    return str(getattr(status, "value", status))
+
+
+def _project_snapshot(project_id: str) -> str:
+    """项目摘要：让助手一开始就知道桌上有什么，不必先追问。"""
+    lines: list[str] = []
+    try:
+        all_projects = projects.list()
+    except Exception:  # noqa: BLE001
+        all_projects = []
+    lines.append("已登记的项目：" + ("、".join(p.id for p in all_projects) or "（无）"))
+    target = next((p for p in all_projects if p.id == project_id), None) if project_id else None
+    if target is None and all_projects:
+        target = all_projects[0]
+    if target is None:
+        return "\n".join(lines)
+    lines.append(f"\n当前项目：{target.id}（{target.name}）")
+    lines.append(f"描述：{target.description or '（无）'}")
+    lines.append(f"任务数：{len(target.job_ids)}")
+    fact_jobs = {job.id: job for job in store.list()}
+    for job_id in target.job_ids:
+        job = fact_jobs.get(job_id)
+        if job:
+            lines.append(f"  - {job_id}: {job.filename} · {_status_text(job.status)} {job.progress}% · {job.stage}")
+    lines.append(f"产物数：{len(target.artifacts)}")
+    for artifact in target.artifacts:
+        fact = _artifact_facts(artifact)
+        mark = "★已批准基准" if artifact.approved else "待审核"
+        lines.append(f"  - [{mark}] {fact['name']} · {fact['kind']} · {fact['size_mb']}MB · {fact['path']}")
+    return "\n".join(lines)
+
+
+def _run_assistant_tool(name: str, arguments: dict) -> dict:
+    """执行一个只读工具。任何异常都会变成 {error: ...} 交回给模型继续推理。"""
+    if name == "list_projects":
+        return {"projects": [
+            {"id": project.id, "name": project.name, "description": project.description,
+             "artifacts": len(project.artifacts), "jobs": len(project.job_ids),
+             "approved": [a.path for a in project.artifacts if a.approved]}
+            for project in projects.list()
+        ]}
+    if name == "get_project":
+        project = projects.get(str(arguments.get("project_id", "")))
+        jobs = {job.id: job for job in store.list()}
+        return {
+            "id": project.id, "name": project.name, "description": project.description,
+            "artifacts": [_artifact_facts(a) for a in project.artifacts],
+            "jobs": [
+                {"id": jid, "filename": jobs[jid].filename, "status": _status_text(jobs[jid].status),
+                 "progress": jobs[jid].progress, "stage": jobs[jid].stage}
+                for jid in project.job_ids if jid in jobs
+            ],
+        }
+    if name == "list_storage":
+        path = _storage_path(str(arguments.get("path", "storage")))
+        if not path.exists():
+            return {"error": f"路径不存在：{arguments.get('path')}"}
+        if path.is_file():
+            return {"path": str(path), "kind": "file", "size_mb": round(path.stat().st_size / 2**20, 2)}
+        entries = sorted(path.iterdir(), key=lambda item: (item.is_file(), item.name))[:200]
+        return {"path": str(path), "entries": [
+            {"name": item.name, "dir": item.is_dir(),
+             "size_mb": round(item.stat().st_size / 2**20, 2) if item.is_file() else None}
+            for item in entries
+        ]}
+    if name == "read_storage_json":
+        path = _storage_path(str(arguments.get("path", "")))
+        if not path.is_file():
+            return {"error": f"文件不存在：{arguments.get('path')}"}
+        limit = int(arguments.get("max_chars") or 4000)
+        text = path.read_text(encoding="utf-8", errors="replace")
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            return {"path": str(path), "text": text[:limit]}
+        compact = json.dumps(data, ensure_ascii=False, indent=1)
+        return {"path": str(path), "json": compact[:limit], "truncated": len(compact) > limit}
+    if name == "inspect_mesh":
+        import open3d as o3d  # 延迟导入：只有真要看几何时才付这个代价
+        import numpy as np
+
+        path = _storage_path(str(arguments.get("path", "")))
+        if not path.is_file():
+            return {"error": f"文件不存在：{arguments.get('path')}"}
+        suffix = path.suffix.lower()
+        if suffix in {".glb", ".gltf", ".obj", ".stl", ".ply"}:
+            mesh = o3d.io.read_triangle_mesh(str(path))
+            if len(mesh.triangles):
+                triangles = np.asarray(mesh.triangles)
+                facts = {
+                    "path": str(path), "kind": "mesh",
+                    "vertices": int(len(mesh.vertices)), "triangles": int(len(triangles)),
+                    "bounds": [np.round(mesh.get_min_bound(), 4).tolist(),
+                               np.round(mesh.get_max_bound(), 4).tolist()],
+                }
+                if len(triangles) <= 4_000_000:
+                    edges = np.sort(np.vstack([
+                        triangles[:, [0, 1]], triangles[:, [1, 2]], triangles[:, [2, 0]]]), axis=1)
+                    unique, counts = np.unique(edges, axis=0, return_counts=True)
+                    facts["boundary_edges"] = int((counts == 1).sum())
+                else:
+                    facts["boundary_edges"] = None
+                    facts["note"] = "三角面超过 400 万，跳过边界边统计"
+                return facts
+        cloud = o3d.io.read_point_cloud(str(path))
+        points = np.asarray(cloud.points)
+        if not len(points):
+            return {"error": "既不是网格也不是点云"}
+        return {
+            "path": str(path), "kind": "pointcloud", "points": int(len(points)),
+            "bounds": [np.round(points.min(axis=0), 4).tolist(),
+                       np.round(points.max(axis=0), 4).tolist()],
+            "center": np.round((points.min(axis=0) + points.max(axis=0)) / 2, 4).tolist(),
+            "has_colors": bool(cloud.has_colors()),
+        }
+    return {"error": f"未知工具：{name}"}
+
+
+def _post_chat_completions(url: str, headers: dict, messages: list[dict],
+                           model: str, tools: list[dict] | None) -> dict:
+    import urllib.error
+    import urllib.request
+
+    body: dict = {"messages": messages}
+    if model:
+        body["model"] = model
+    if tools:
+        body["tools"] = tools
+        body["tool_choice"] = "auto"
+    request = urllib.request.Request(
+        url, data=json.dumps(body).encode("utf-8"), headers=headers, method="POST"
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=180) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as error:
+        detail = error.read().decode("utf-8", "replace")[:400]
+        raise HTTPException(status_code=502, detail=f"上游返回 {error.code}：{detail}") from error
+    except Exception as error:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"无法访问上游接口：{error}") from error
+
+
+@app.post("/api/v1/assistant/chat")
+def assistant_chat(payload: AssistantChatRequest) -> dict:
+    """带项目上下文的助手对话：注入项目快照 + 只读工具循环。
+
+    同步函数：FastAPI 会把它放到线程池里执行，不会卡住事件循环。
+    工具全部只读且限制在 storage/ 内；助手不会写任何文件、也不会批准任何候选。
+    """
+    base = payload.endpoint.strip().rstrip("/")
+    if not base.endswith("/chat/completions"):
+        base = f"{base}/chat/completions"
+    headers = {"Content-Type": "application/json"}
+    if payload.api_key:
+        headers["Authorization"] = f"Bearer {payload.api_key}"
+
+    messages: list[dict] = [
+        {"role": "system", "content": f"{ASSISTANT_RULES}\n\n=== 当前项目快照 ===\n{_project_snapshot(payload.project_id)}"}
+    ] + [message.model_dump() for message in payload.messages]
+
+    trace: list[dict] = []
+    for _ in range(5):
+        data = _post_chat_completions(base, headers, messages, payload.model, ASSISTANT_TOOLS)
+        choices = data.get("choices") or []
+        if not choices:
+            raise HTTPException(status_code=502, detail=f"上游响应不符合 OpenAI 规范：{str(data)[:300]}")
+        message = choices[0].get("message") or {}
+        calls = message.get("tool_calls") or []
+        if not calls:
+            return {"content": message.get("content") or "", "tool_calls": trace}
+        messages.append(message)
+        for call in calls:
+            function = call.get("function") or {}
+            name = function.get("name", "")
+            try:
+                arguments = json.loads(function.get("arguments") or "{}")
+            except json.JSONDecodeError:
+                arguments = {}
+            try:
+                result = _run_assistant_tool(name, arguments if isinstance(arguments, dict) else {})
+                trace.append({"name": name, "arguments": arguments, "ok": "error" not in result})
+            except Exception as error:  # noqa: BLE001
+                result = {"error": str(error)}
+                trace.append({"name": name, "arguments": arguments, "ok": False})
+            messages.append({
+                "role": "tool", "tool_call_id": call.get("id", ""),
+                "content": json.dumps(result, ensure_ascii=False)[:6000],
+            })
+    return {"content": "（工具调用已达 5 轮上限，请把问题缩小一点再问）", "tool_calls": trace}
 
 
 @app.get("/api/v1/projects/{project_id}/artifacts/{artifact_index}")

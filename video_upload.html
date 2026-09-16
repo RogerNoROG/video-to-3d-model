@@ -27,19 +27,33 @@
     .panel-body { padding:16px; }
     .status { display:inline-flex; align-items:center; min-height:24px; padding:2px 8px; border-radius:4px; font-size:12px; font-weight:650; white-space:nowrap; }
     .status.review { color:#874900; background:#fff0d8; } .status.approved { color:var(--ok); background:#def4e8; } .status.failed { color:var(--danger); background:#fce4e4; } .status.working { color:#0d5879; background:var(--accent-soft); }
-    .model-workbench { display:grid; grid-template-columns:minmax(0,1fr) 245px; min-height:620px; }
-    .viewer-stage { position:relative; min-height:500px; background:#dfe6ea; }
-    model-viewer { width:100%; height:100%; min-height:620px; --poster-color:#dfe6ea; }
-    .model-meta { position:absolute; top:14px; left:14px; max-width:calc(100% - 28px); padding:9px 11px; background:rgba(255,255,255,.92); border:1px solid rgba(156,169,181,.8); border-radius:5px; box-shadow:0 1px 3px rgba(19,32,43,.1); }
+    .model-workbench { display:grid; grid-template-columns:minmax(0,1fr) 500px; min-height:560px; }
+    .viewer-stage { position:relative; height:560px; background:#dfe6ea; }
+    model-viewer { width:100%; height:100%; min-height:560px; --poster-color:#dfe6ea; --min-hotspot-opacity:1; }
+    /* 坐标系标记：直接挂在对应面的中心，位置由 hotspot 按模型自身三维坐标投影 */
+    .axis-marker { position:absolute; padding:1px 6px; border:1px solid currentColor; border-radius:999px; background:rgba(255,255,255,.9); font:700 11px/1.5 system-ui,sans-serif; pointer-events:none; box-shadow:0 1px 2px rgba(19,32,43,.18); transition:opacity .16s linear; }
+    .axis-marker.x { color:#c0392b; } .axis-marker.y { color:#1d6b4a; } .axis-marker.z { color:#146c94; }
+    /* 中心标记只用来量“模型中心投到屏幕哪里”，本身不可见 */
+    .axis-marker.axis-center { opacity:0; padding:0; border:0; box-shadow:none; }
+    .model-meta { position:absolute; top:14px; left:14px; max-width:min(430px, calc(100% - 28px)); padding:9px 11px; background:rgba(255,255,255,.92); border:1px solid rgba(156,169,181,.8); border-radius:5px; box-shadow:0 1px 3px rgba(19,32,43,.1); }
     .model-meta strong,.model-meta small { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; } .model-meta small { color:var(--muted); margin-top:2px; }
-    .artifact-rail { border-left:1px solid var(--line); background:#f8fafb; padding:12px; overflow:auto; }
+    .artifact-rail { border-left:1px solid var(--line); background:#f8fafb; padding:12px; overflow-y:auto; overflow-x:hidden; max-height:560px; }
     .artifact-rail h3 { margin:0 0 9px; color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:0; }
-    .artifact-list { display:grid; gap:7px; }
+    .artifact-list { display:grid; gap:7px; grid-template-columns:repeat(2,minmax(0,1fr)); }
     .artifact-item { width:100%; padding:10px; text-align:left; color:var(--ink); border:1px solid var(--line); border-radius:5px; background:#fff; }
     .artifact-item:hover { background:#f2f8fb; border-color:#9cc7d8; }
     .artifact-item.active { border-color:var(--accent); box-shadow:inset 3px 0 var(--accent); background:#eef8fc; }
-    .artifact-item strong,.artifact-item small { display:block; } .artifact-item strong { font-weight:650; } .artifact-item small { color:var(--muted); margin-top:3px; font-size:12px; }
+    .artifact-item strong,.artifact-item small { display:block; overflow-wrap:anywhere; } .artifact-item strong { font-weight:650; } .artifact-item small { color:var(--muted); margin-top:3px; font-size:12px; }
     .artifact-item .tag { display:inline-block; margin-bottom:4px; color:var(--warn); font-size:11px; font-weight:700; } .artifact-item.approved .tag { color:var(--ok); }
+    /* 已批准基准置顶：跨满两列自成一行，并加一条绿色左标 */
+    .artifact-item.pinned { grid-column:1 / -1; border-color:var(--ok); box-shadow:inset 3px 0 var(--ok); background:#f4fbf7; }
+    .artifact-item { display:grid; gap:6px; }
+    .artifact-pick { width:100%; padding:0; border:0; background:transparent; color:inherit; font:inherit; text-align:left; cursor:pointer; }
+    .artifact-actions { display:flex; gap:6px; }
+    .artifact-actions button { flex:1; padding:4px 8px; font-size:12px; font-weight:650; border:1px solid var(--line); border-radius:4px; background:#fff; cursor:pointer; }
+    .artifact-actions button:disabled { opacity:.55; cursor:progress; }
+    .artifact-actions .approve { color:var(--ok); border-color:var(--ok); }
+    .artifact-actions .revoke { color:var(--warn); border-color:var(--warn); }
     .viewer-actions { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
     .download-link { color:var(--accent); font-weight:650; text-decoration:none; }
     .project-summary { color:var(--muted); font-size:13px; }
@@ -68,7 +82,32 @@
     .step-eta-row.active { color:var(--ink); background:#edf7fb; } .step-eta-row.done { color:var(--ok); } .step-eta-row.failed { color:var(--danger); }
     .step-eta-mark { font-weight:700; text-align:center; } .step-eta-label { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; } .step-eta-time { font-size:12px; white-space:nowrap; }
     .empty { color:var(--muted); padding:8px 0; }
-    @media (max-width:960px) { .workspace { grid-template-columns:1fr; } .side-column { grid-template-columns:1fr 1fr; } .model-workbench { grid-template-columns:1fr; } .artifact-rail { border-left:0; border-top:1px solid var(--line); } .artifact-list { grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); } }
+    /* 外层行式布局：第一行「项目 | 导入视频」，第二行「AI 助手 | 视频任务」，
+       再往下是任务进度、当前模型展示与模型版本，最底下一行是设置入口。 */
+    .row { display:grid; gap:16px; margin-bottom:16px; align-items:start; }
+    .row-primary { grid-template-columns:minmax(0,1fr) minmax(0,1fr); }
+    .row-secondary { grid-template-columns:minmax(0,1fr) 380px; align-items:stretch; }
+    /* 第二行两块面板等高：面板本身排成「表头 + 自适应主体」，聊天记录填满剩余空间并自己滚动。 */
+    .row-secondary > .panel { display:grid; grid-template-rows:auto minmax(0,1fr); }
+    .row-secondary > .panel > .panel-body { min-height:0; }
+    .project-picker { margin-bottom:10px; }
+    .chat-body { display:grid; gap:10px; grid-template-rows:minmax(0,1fr) auto; }
+    .chat-log { display:grid; gap:8px; align-content:start; min-height:96px; overflow-y:auto; padding-right:4px; }
+    .chat-msg { padding:8px 10px; border:1px solid var(--line); border-radius:6px; background:#fff; white-space:pre-wrap; word-break:break-word; }
+    .chat-msg.user { background:#eef8fc; border-color:#9cc7d8; }
+    .chat-msg.error { color:var(--danger); background:#fce4e4; border-color:#e2a3a3; }
+    .chat-msg .chat-role { display:block; margin-bottom:3px; color:var(--muted); font-size:11px; font-weight:700; }
+    .chat-trace { margin-top:6px; padding-top:5px; border-top:1px dashed var(--line); color:var(--muted); font-size:11px; }
+    .chat-form { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:8px; align-items:end; }
+    .chat-form textarea { padding:8px 9px; border:1px solid var(--line); border-radius:5px; font:inherit; resize:vertical; }
+    .shell-footer { display:flex; align-items:center; gap:12px; margin-top:16px; padding-top:14px; border-top:1px solid var(--line); }
+    .settings-dialog { width:min(540px,92vw); padding:0; border:1px solid var(--line); border-radius:8px; }
+    .settings-dialog::backdrop { background:rgba(23,32,43,.35); }
+    .settings-form { display:grid; gap:12px; padding:18px; }
+    .settings-form label { display:grid; gap:5px; font-size:13px; font-weight:650; }
+    .settings-form input { padding:8px 9px; border:1px solid var(--line); border-radius:5px; font:inherit; font-weight:400; }
+    .settings-actions { display:flex; gap:8px; justify-content:flex-end; }
+    @media (max-width:960px) { .row-primary,.row-secondary { grid-template-columns:1fr; } .model-workbench { grid-template-columns:1fr; } .artifact-rail { border-left:0; border-top:1px solid var(--line); } .artifact-list { grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); } }
     @media (max-width:620px) { .shell { padding:12px; } .topbar,.project-picker,.upload-grid { align-items:stretch; flex-direction:column; } .project-picker { min-width:0; } .side-column { grid-template-columns:1fr; } .job-grid { grid-template-columns:1fr; } .viewer-stage model-viewer { min-height:440px; } }
   </style>
 </head>
@@ -76,49 +115,85 @@
   <main class="shell">
     <header class="topbar">
       <h1>三维重建项目</h1>
-      <div class="project-picker">
-        <select id="projectSelect" aria-label="选择项目"><option value="">未归档任务</option></select>
-        <button id="createProject" class="secondary" type="button">新建项目</button>
-      </div>
     </header>
 
-    <div class="workspace">
-      <section class="main-column">
-        <section class="panel">
-          <div class="panel-head"><div><h2 id="modelTitle">当前审核模型</h2><p class="project-summary" id="modelPath">正在读取项目产物</p></div><span id="modelStatus" class="status review">待审核</span></div>
-          <div class="model-workbench">
-            <div class="viewer-stage"><model-viewer id="modelViewer" camera-controls shadow-intensity="1" exposure="1" environment-image="neutral" loading="eager" alt="三维模型"></model-viewer><div class="model-meta"><strong id="viewerName">正在载入</strong><small id="viewerHint">当前项目的最新审核候选会优先显示</small></div></div>
-            <aside class="artifact-rail"><h3>模型版本</h3><div id="artifactList" class="artifact-list"></div></aside>
+    <!-- 第一行：项目列表（含选择/新建项目） 与 导入视频 -->
+    <div class="row row-primary">
+      <section class="panel">
+        <div class="panel-head"><h2>项目</h2><span class="project-summary" id="projectSummary"></span></div>
+        <div class="panel-body">
+          <div class="project-picker">
+            <select id="projectSelect" aria-label="选择项目"><option value="">未归档任务</option></select>
+            <button id="createProject" class="secondary" type="button">新建项目</button>
           </div>
-          <div class="panel-head"><span class="project-summary" id="modelNote">候选模型不会替换已批准基准。</span><div class="viewer-actions"><a id="downloadLink" class="download-link" hidden download>下载 GLB</a><button id="resetCamera" class="secondary" type="button">重置视角</button></div></div>
-        </section>
-
-        <section class="panel job-panel" id="jobPanel" hidden>
-          <div class="panel-head"><h2>任务进度</h2><span id="jobStatus" class="status working">处理中</span></div>
-          <div class="panel-body"><div class="job-grid"><div class="metric"><small>任务</small><strong id="jobFile">-</strong></div><div class="metric"><small>阶段</small><strong id="jobStage">-</strong></div><div class="metric"><small>进度</small><strong id="jobPercent">-</strong></div><div class="metric"><small>整体剩余时间</small><strong id="jobEta">-</strong></div><div class="metric"><small>当前步骤剩余</small><strong id="stageEta">-</strong></div></div><div class="progress"><span id="progressBar"></span></div><div class="job-line"><span id="jobId">-</span><span id="jobTime">-</span></div><div class="step-eta"><h3>流程 ETA</h3><div id="stepEtaList" class="step-eta-list"></div></div><div id="jobMessage" class="message"></div></div>
-        </section>
-
-        <section class="panel upload-panel" id="uploadPanel">
-          <div class="panel-head"><h2>导入视频</h2><button id="submitVideo" type="button">开始建模</button></div>
-          <div class="panel-body"><div class="upload-grid"><label id="dropzone" class="dropzone" for="fileInput">拖放视频到此处，或点击选择</label><input id="fileInput" type="file" accept="video/mp4,video/quicktime,video/x-msvideo,video/x-matroska,video/webm"><div class="selected-file" id="selectedFile">尚未选择视频</div></div></div>
-        </section>
+          <div id="projectCards" class="project-card-list"></div>
+        </div>
       </section>
 
-      <aside class="side-column">
-        <section class="panel"><div class="panel-head"><h2>项目</h2></div><div class="panel-body"><div id="projectCards" class="project-card-list"></div></div></section>
-        <section class="panel"><div class="panel-head"><h2>视频任务</h2></div><div class="panel-body"><div id="taskList" class="task-list"></div></div></section>
-      </aside>
+      <section class="panel upload-panel" id="uploadPanel">
+        <div class="panel-head"><h2>导入视频</h2><button id="submitVideo" type="button">开始建模</button></div>
+        <div class="panel-body"><div class="upload-grid"><label id="dropzone" class="dropzone" for="fileInput">拖放视频到此处，或点击选择</label><input id="fileInput" type="file" accept="video/mp4,video/quicktime,video/x-msvideo,video/x-matroska,video/webm"><div class="selected-file" id="selectedFile">尚未选择视频</div></div></div>
+      </section>
     </div>
+
+    <!-- 第二行：AI 助手 与 视频任务 -->
+    <div class="row row-secondary">
+      <section class="panel">
+        <div class="panel-head"><h2>AI 助手</h2><span class="project-summary" id="chatConfigLabel">未配置接口</span></div>
+        <div class="panel-body chat-body">
+          <div id="chatLog" class="chat-log"><div class="empty">在底部「设置」里填好 OpenAI 兼容的接口地址与 API Key 后即可对话。</div></div>
+          <form id="chatForm" class="chat-form">
+            <textarea id="chatInput" rows="2" placeholder="输入问题…（Enter 发送，Shift+Enter 换行）"></textarea>
+            <button id="chatSend" type="submit">发送</button>
+          </form>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head"><h2>视频任务</h2><span class="project-summary" id="taskSummary"></span></div>
+        <div class="panel-body"><div id="taskList" class="task-list"></div></div>
+      </section>
+    </div>
+
+    <section class="panel job-panel" id="jobPanel" hidden>
+      <div class="panel-head"><h2>任务进度</h2><span id="jobStatus" class="status working">处理中</span></div>
+      <div class="panel-body"><div class="job-grid"><div class="metric"><small>任务</small><strong id="jobFile">-</strong></div><div class="metric"><small>阶段</small><strong id="jobStage">-</strong></div><div class="metric"><small>进度</small><strong id="jobPercent">-</strong></div><div class="metric"><small>整体剩余时间</small><strong id="jobEta">-</strong></div><div class="metric"><small>当前步骤剩余</small><strong id="stageEta">-</strong></div></div><div class="progress"><span id="progressBar"></span></div><div class="job-line"><span id="jobId">-</span><span id="jobTime">-</span></div><div class="step-eta"><h3>流程 ETA</h3><div id="stepEtaList" class="step-eta-list"></div></div><div id="jobMessage" class="message"></div></div>
+    </section>
+
+    <!-- 第三行：当前模型展示 与 模型版本 -->
+    <section class="panel">
+      <div class="panel-head"><div><h2 id="modelTitle">当前审核模型</h2><p class="project-summary" id="modelPath">正在读取项目产物</p></div><span id="modelStatus" class="status review">待审核</span></div>
+      <div class="model-workbench">
+        <div class="viewer-stage"><model-viewer id="modelViewer" camera-controls shadow-intensity="1" exposure="1" environment-image="neutral" loading="eager" alt="三维模型"></model-viewer><div class="model-meta"><strong id="viewerName">正在载入</strong><small id="viewerHint">当前项目的最新审核候选会优先显示</small></div></div>
+        <aside class="artifact-rail"><h3>模型版本</h3><div id="artifactList" class="artifact-list"></div></aside>
+      </div>
+      <div class="panel-head"><span class="project-summary" id="modelNote">候选模型不会替换已批准基准。</span><div class="viewer-actions"><a id="downloadLink" class="download-link" hidden download>下载 GLB</a><button id="resetCamera" class="secondary" type="button">重置视角</button></div></div>
+    </section>
+
+    <footer class="shell-footer">
+      <button id="openSettings" class="secondary" type="button">设置</button>
+      <span class="project-summary">配置 AI 助手的 OpenAI 兼容接口（地址 / API Key / 模型名）</span>
+    </footer>
   </main>
+
+  <dialog id="settingsDialog" class="settings-dialog">
+    <div class="settings-form">
+      <h2>AI 助手设置</h2>
+      <label>接口地址（OpenAI 兼容）<input id="settingsEndpoint" type="url" placeholder="https://api.openai.com/v1" autocomplete="off"></label>
+      <label>API Key<input id="settingsKey" type="password" placeholder="sk-…" autocomplete="off"></label>
+      <label>模型名（可选）<input id="settingsModel" type="text" placeholder="gpt-4o-mini" autocomplete="off"></label>
+      <p class="project-summary">只保存在本机浏览器 localStorage；请求经本机后端转发（避开浏览器跨域限制），密钥不写进项目文件。</p>
+      <div class="settings-actions"><button id="settingsSave" type="button">保存</button><button id="settingsClose" class="secondary" type="button">关闭</button></div>
+    </div>
+  </dialog>
   <script type="module" src="https://unpkg.com/@google/model-viewer@4.1.0/dist/model-viewer.min.js"></script>
   <script>
-    // 8000 正承载已经启动的 COLMAP 任务，不能为更新流程而重启；项目操作使用
-    // 可独立更新的 8001 服务。两者共享同一 storage/ 与项目索引。
-    const API = 'http://127.0.0.1:8001';
+    // 项目 API 与任务主链统一在 8000（原先另有 8001 的 ETA API，已合并回来）。
+    const API = 'http://127.0.0.1:8000';
     const STATUS_API = API;
     const LATEST_PATH = 'storage/yellow-cube/six-face-v1/feature-and-plane-v1/merged_six_face_feature_protected_planes.glb';
     const $ = id => document.getElementById(id);
-    const state = { projects: [], projectId: 'yellow-cube', artifacts: [], activeArtifact: null, file: null, poll: null };
+    const state = { projects: [], projectId: 'yellow-cube', artifacts: [], activeArtifact: null, file: null, poll: null, chat: [] };
 
     function modelParams() {
       const values = new URLSearchParams(location.search).getAll('model');
@@ -163,18 +238,57 @@
       $('downloadLink').href = url; $('downloadLink').download = entry.path.split('/').pop() || 'model.glb'; $('downloadLink').hidden = false;
       renderArtifacts();
     }
+    function artifactCard(entry) {
+      const item = document.createElement('div');
+      item.className = `artifact-item ${entry.approved ? 'approved pinned' : ''}${state.activeArtifact && state.activeArtifact.path === entry.path ? ' active' : ''}`;
+      const pick = document.createElement('button');
+      pick.type = 'button'; pick.className = 'artifact-pick';
+      pick.innerHTML = `<span class="tag">${entry.approved ? '已批准基准' : entry.kind === 'alignment-candidate' ? '自动对齐' : entry.path === LATEST_PATH ? '当前审核' : statusText(entry.approved)}</span><strong></strong><small></small>`;
+      pick.querySelector('strong').textContent = entry.name;
+      pick.querySelector('small').textContent = entry.path.split('/').slice(-2).join('/');
+      pick.onclick = () => setModel(entry);
+      item.appendChild(pick);
+      if (Number.isInteger(entry.index)) {
+        const actions = document.createElement('div'); actions.className = 'artifact-actions';
+        const toggle = document.createElement('button');
+        toggle.type = 'button'; toggle.className = entry.approved ? 'revoke' : 'approve';
+        toggle.textContent = entry.approved ? '撤回批准' : '批准为基准';
+        toggle.onclick = () => setApproved(entry, !entry.approved, toggle);
+        actions.appendChild(toggle); item.appendChild(actions);
+      }
+      return item;
+    }
     function renderArtifacts() {
       const entries = modelParams().length ? modelParams() : modelOrder(state.artifacts);
       const list = $('artifactList'); list.replaceChildren();
       if (!entries.length) { list.innerHTML = '<div class="empty">没有可展示的模型</div>'; return; }
-      entries.forEach(entry => {
-        const button = document.createElement('button');
-        button.type = 'button'; button.className = `artifact-item ${entry.approved ? 'approved' : ''}${state.activeArtifact && state.activeArtifact.path === entry.path ? ' active' : ''}`;
-        button.innerHTML = `<span class="tag">${entry.kind === 'alignment-candidate' ? '自动对齐' : entry.path === LATEST_PATH ? '当前审核' : statusText(entry.approved)}</span><strong></strong><small></small>`;
-        button.querySelector('strong').textContent = entry.name;
-        button.querySelector('small').textContent = entry.path.split('/').slice(-2).join('/');
-        button.onclick = () => setModel(entry); list.appendChild(button);
-      });
+      // 已批准基准单独置顶一行（跨满两列），其余候选再按两列排 —— 基准永远第一眼可见。
+      entries.filter(entry => entry.approved).forEach(entry => list.appendChild(artifactCard(entry)));
+      entries.filter(entry => !entry.approved).forEach(entry => list.appendChild(artifactCard(entry)));
+    }
+    // 批准是互斥的：后端把某条设为批准时会同时撤回其它条目，保证「已批准基准」唯一。
+    async function setApproved(entry, value, control) {
+      const previous = control.textContent;
+      control.disabled = true; control.textContent = '写入中…';
+      try {
+        const response = await fetch(`${API}/api/v1/projects/${state.projectId}/artifacts/${entry.index}`, {
+          method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ approved: value }),
+        });
+        const project = await json(response);
+        if (!response.ok) throw new Error(project.detail || '更新批准状态失败');
+        state.artifacts = project.artifacts;
+        const active = state.artifacts.find(item => item.path === entry.path);
+        if (active && state.activeArtifact && state.activeArtifact.path === entry.path) {
+          state.activeArtifact = active;
+          const node = $('modelStatus');
+          node.className = `status ${statusClass(active.approved)}`;
+          node.textContent = statusText(active.approved);
+        }
+        renderArtifacts();
+      } catch (error) {
+        control.disabled = false; control.textContent = previous;
+        $('jobMessage').textContent = error.message;
+      }
     }
     async function json(response) { try { return await response.json(); } catch { return {}; } }
     async function fetchTaskStatus(endpoint) {
@@ -199,14 +313,22 @@
         button.innerHTML = '<strong></strong><small></small>'; button.querySelector('strong').textContent = project.name; button.querySelector('small').textContent = `${project.artifacts.length} 个模型 · ${project.job_ids.length} 个视频任务`;
         button.onclick = async () => { state.projectId = project.id; $('projectSelect').value = project.id; await refreshProject(); }; list.appendChild(button);
       });
+      const active = state.projects.find(project => project.id === state.projectId);
+      $('projectSummary').textContent = active ? `${active.artifacts.length} 个模型 · ${active.job_ids.length} 个任务` : '';
     }
     async function loadArtifacts() {
       if (!state.projectId) { state.artifacts = []; renderArtifacts(); return; }
       const response = await fetch(`${API}/api/v1/projects/${state.projectId}/artifacts`); const artifacts = await json(response);
       if (!response.ok) throw new Error(artifacts.detail || '无法读取项目模型');
       state.artifacts = artifacts;
+      // 默认展示**已批准的基准**（它同时也是置顶那一张），而不是最新的自动候选；
+      // 只有在 URL 明确指定 model= 时才用 URL 里的。
+      // ⚠️ 必须从 modelOrder() 里挑：模型 URL 用的是 artifacts/{index}，
+      //    而 index 只有 modelOrder() 会补上 —— 直接用 API 数组里的对象会取到
+      //    index=undefined，请求打到 /artifacts/undefined 就 404，表现为“刷新后不加载”。
       const override = modelParams();
-      state.activeArtifact = override[0] || modelOrder(artifacts)[0] || null;
+      const ordered = modelOrder(artifacts);
+      state.activeArtifact = override[0] || ordered.find(entry => entry.approved) || ordered[0] || null;
       setModel(state.activeArtifact);
     }
     async function loadTasks() {
@@ -217,6 +339,7 @@
     }
     function renderTasks(tasks) {
       const list = $('taskList'); list.replaceChildren();
+      $('taskSummary').textContent = tasks ? `${tasks.length} 个任务` : '';
       if (!tasks?.length) { list.innerHTML = '<div class="empty">这个项目还没有视频任务</div>'; return; }
       tasks.slice(0, 12).forEach(task => {
         const row = document.createElement('div'); row.className = 'task'; row.innerHTML = '<div class="task-main"><strong></strong><small></small></div><div class="task-controls"></div>';
@@ -259,6 +382,125 @@
     ['dragleave','drop'].forEach(type => $('dropzone').addEventListener(type, event => { event.preventDefault(); $('dropzone').classList.remove('active'); }));
     $('dropzone').addEventListener('drop', event => setFile(event.dataTransfer.files[0])); $('submitVideo').onclick = submitVideo;
     $('resetCamera').onclick = () => { const viewer = $('modelViewer'); const src = viewer.src; viewer.src = ''; requestAnimationFrame(() => { viewer.src = src; }); };
+
+    // ---------------- AI 助手（OpenAI 兼容接口） ----------------
+    // Key 只存本机 localStorage；请求经本机后端 /api/v1/assistant/chat 转发，
+    // 避开第三方接口的浏览器跨域限制，密钥也不写进项目文件。
+    const CHAT_KEY = 'modelApi.assistant';
+    function chatConfig() { try { return JSON.parse(localStorage.getItem(CHAT_KEY)) || {}; } catch { return {}; } }
+    function renderChatConfig() {
+      const config = chatConfig();
+      $('chatConfigLabel').textContent = config.endpoint ? `${config.model || '默认模型'} · ${config.endpoint}` : '未配置接口';
+      $('settingsEndpoint').value = config.endpoint || '';
+      $('settingsKey').value = config.apiKey || '';
+      $('settingsModel').value = config.model || '';
+    }
+    function appendChat(role, text, className) {
+      const empty = $('chatLog').querySelector('.empty'); if (empty) empty.remove();
+      const bubble = document.createElement('div');
+      bubble.className = `chat-msg ${className || role}`;
+      bubble.innerHTML = '<span class="chat-role"></span><span class="chat-text"></span>';
+      bubble.querySelector('.chat-role').textContent = ({user:'我', assistant:'AI', error:'错误'})[role] || role;
+      bubble.querySelector('.chat-text').textContent = text;
+      $('chatLog').appendChild(bubble); $('chatLog').scrollTop = $('chatLog').scrollHeight;
+      return bubble;
+    }
+    async function sendChat() {
+      const input = $('chatInput'); const text = input.value.trim();
+      if (!text) return;
+      const config = chatConfig();
+      if (!config.endpoint) { appendChat('error', '还没配置接口地址：点底部「设置」填写 OpenAI 兼容接口与 API Key。'); return; }
+      appendChat('user', text); input.value = '';
+      state.chat.push({ role: 'user', content: text });
+      const bubble = appendChat('assistant', '思考中…');
+      const button = $('chatSend'); button.disabled = true;
+      try {
+        const response = await fetch(`${API}/api/v1/assistant/chat`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ endpoint: config.endpoint, api_key: config.apiKey || '', model: config.model || '', project_id: state.projectId || '', messages: state.chat.slice(-20) }),
+        });
+        const data = await json(response);
+        if (!response.ok) throw new Error(data.detail || '请求失败');
+        bubble.querySelector('.chat-text').textContent = data.content || '（空回复）';
+        // 把助手实际读过的项目数据列出来，方便核对它是不是在“看真东西”
+        if (Array.isArray(data.tool_calls) && data.tool_calls.length) {
+          const trace = document.createElement('div'); trace.className = 'chat-trace';
+          trace.textContent = '读取项目数据：' + data.tool_calls.map(call => {
+            const args = Object.values(call.arguments || {}).join(', ');
+            return `${call.name}(${args})${call.ok ? '' : ' ✗'}`;
+          }).join(' → ');
+          bubble.appendChild(trace);
+        }
+        state.chat.push({ role: 'assistant', content: data.content || '' });
+      } catch (error) {
+        bubble.className = 'chat-msg error'; bubble.querySelector('.chat-role').textContent = '错误';
+        bubble.querySelector('.chat-text').textContent = error.message;
+      } finally {
+        button.disabled = false; $('chatLog').scrollTop = $('chatLog').scrollHeight;
+      }
+    }
+    $('chatForm').onsubmit = event => { event.preventDefault(); sendChat(); };
+    $('chatInput').onkeydown = event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); sendChat(); } };
+    $('openSettings').onclick = () => { renderChatConfig(); $('settingsDialog').showModal(); };
+    $('settingsClose').onclick = () => $('settingsDialog').close();
+    $('settingsSave').onclick = () => {
+      const config = { endpoint: $('settingsEndpoint').value.trim(), apiKey: $('settingsKey').value.trim(), model: $('settingsModel').value.trim() };
+      localStorage.setItem(CHAT_KEY, JSON.stringify(config));
+      renderChatConfig(); $('settingsDialog').close();
+      appendChat('assistant', config.endpoint ? `已保存接口配置：${config.endpoint}` : '已清空接口配置。');
+    };
+    renderChatConfig();
+
+    // ---------------- 坐标系标记（X± / Y± / Z±）----------------
+    // 用 model-viewer 自带的 hotspot：坐标写进模型自己的 3D 空间，由它投影到屏幕，
+    // 所以转动视角时标签会跟着对应的面一起跑，不需要自己算相机矩阵。
+    const AXIS_FACES = [['x', 1, 'X+'], ['x', -1, 'X−'], ['y', 1, 'Y+'], ['y', -1, 'Y−'], ['z', 1, 'Z+'], ['z', -1, 'Z−']];
+    const AXIS_INDEX = { x: 0, y: 1, z: 2 };
+    function renderAxisMarkers() {
+      const viewer = $('modelViewer');
+      if (typeof viewer.getDimensions !== 'function' || typeof viewer.getBoundingBoxCenter !== 'function') return;
+      const size = viewer.getDimensions(); const center = viewer.getBoundingBoxCenter();
+      if (!size || !center) return;
+      for (const node of viewer.querySelectorAll('.axis-marker')) node.remove();
+      AXIS_FACES.forEach(([axis, sign, label]) => {
+        const point = { x: center.x, y: center.y, z: center.z };
+        point[axis] = center[axis] + sign * (size[axis] / 2) * 1.04;
+        const marker = document.createElement('button');
+        marker.type = 'button'; marker.className = `axis-marker ${axis}`;
+        marker.slot = `hotspot-axis-${axis}-${sign > 0 ? 'p' : 'n'}`;   // slot 名不能带 +/- 号
+        marker.dataset.position = `${point.x.toFixed(3)}m ${point.y.toFixed(3)}m ${point.z.toFixed(3)}m`;
+        marker.dataset.axis = axis; marker.dataset.sign = String(sign);
+        marker.textContent = label;
+        viewer.appendChild(marker);
+      });
+      updateAxisMarkerOpacity();
+    }
+    // 按视角调透明度：拿相机在模型坐标系里的方向 c，用面法线 n 与它的点积定亮度 ——
+    // n·c 接近 +1（正对你）最实，接近 0（正侧视）取中间，接近 -1（背对你、被模型挡住）最淡。
+    // 为什么不用“投影离中心更远 = 更近”这个线索：实测 model-viewer 的 hotspot 投影在两对点
+    // 上完全对称（偏移比恰好 1.000），透视远近根本用不上。
+    function updateAxisMarkerOpacity() {
+      const viewer = $('modelViewer');
+      if (typeof viewer.getCameraOrbit !== 'function') return;
+      const orbit = viewer.getCameraOrbit();
+      if (!orbit) return;
+      // ⚠️ getCameraOrbit() 的 theta/phi **实测就是弧度**（要 38deg 给 0.66、要 68deg 给 1.19），
+      //    所以直接拿来用。别加“大于 π 就当度数”的启发式 —— theta 的弧度本来就能到 2π
+      //    （实测要 220deg 给 3.84），那样会被当成 3.8deg，背面朝相机时反而把正面算成最亮。
+      const theta = orbit.theta, phi = orbit.phi;
+      const direction = [Math.sin(phi) * Math.sin(theta), Math.cos(phi), Math.sin(phi) * Math.cos(theta)];
+      for (const marker of viewer.querySelectorAll('.axis-marker')) {
+        const axis = marker.dataset.axis;
+        if (!(axis in AXIS_INDEX)) continue;
+        const dot = direction[AXIS_INDEX[axis]] * Number(marker.dataset.sign);
+        marker.style.opacity = (dot >= 0 ? 0.55 + 0.45 * dot : 0.55 + 0.35 * dot).toFixed(3);
+        marker.style.zIndex = dot >= 0 ? '2' : '1';
+      }
+    }
+    $('modelViewer').addEventListener('load', renderAxisMarkers);
+    ['camera-change', 'camera-change-end'].forEach(type =>
+      $('modelViewer').addEventListener(type, updateAxisMarkerOpacity));
+
     (async () => {
       const direct = modelParams();
       if (direct.length) setModel(direct[0]);

@@ -25,11 +25,9 @@ BACKEND_LOG="logs/backend.log"
 FRONTEND_LOG="logs/frontend.log"
 BACKEND_PID="logs/backend.pid"
 FRONTEND_PID="logs/frontend.pid"
-# 当前正在处理的任务由旧后端持有时，不能重启它，否则会中断 COLMAP。
-# 8001 是可独立更新的项目 API：网页从这里读取 ETA、上传后续视频和执行自动对齐；
-# 已经在 8000 上运行的任务不受影响，两者共享 storage/。
-ETA_BACKEND_LOG="logs/eta-backend.log"
-ETA_BACKEND_PID="logs/eta-backend.pid"
+# 项目 API 与任务主链统一在 8000（原先另有 8001 的 ETA API，已合并回来）。
+# ⚠️ 8000 上可能有正在跑的 COLMAP 任务：重启前先确认没有 processing/queued 的任务，
+#    否则会中断数小时的稠密重建。
 
 export PATH="$HOME/.local/bin:$PATH"
 export MODEL_API_COLMAP_BINARY="$HOME/.local/bin/colmap"
@@ -116,15 +114,6 @@ start() {
     detach "$FRONTEND_LOG" python3 -m http.server 5500 > "$FRONTEND_PID"
     echo "前端已启动 (pid $(cat "$FRONTEND_PID")): http://localhost:5500/video_upload.html"
   fi
-  if listening 8001; then
-    echo "ETA API 端口 8001 已有服务监听"
-  elif alive "$ETA_BACKEND_PID"; then
-    echo "ETA API 已在运行 (pid $(cat "$ETA_BACKEND_PID"))"
-  else
-    detach "$ETA_BACKEND_LOG" ./.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8001 \
-      > "$ETA_BACKEND_PID"
-    echo "ETA API 已启动 (pid $(cat "$ETA_BACKEND_PID"))"
-  fi
   # 后端冷启动约 2-3 秒，轮询等待而不是 sleep 固定时长
   for _ in $(seq 1 40); do
     curl -fsS http://127.0.0.1:8000/health > /dev/null 2>&1 && break
@@ -145,15 +134,12 @@ stop() {
   if alive "$FRONTEND_PID"; then
     kill "$(cat "$FRONTEND_PID")" 2>/dev/null || true
   fi
-  if alive "$ETA_BACKEND_PID"; then
-    kill "$(cat "$ETA_BACKEND_PID")" 2>/dev/null || true
-  fi
   # 关键：uvicorn 优雅退出**不会**杀死 BackgroundTasks 起的子进程，colmap 会变成孤儿
   # 继续跑，与下一次启动的 colmap 抢 GPU、抢同一批输出文件。必须显式清掉。
   # 但要避开 tools/pipeline/build_dense_model.py 起的 colmap —— 那是另开的长期任务，
   # 一刀切 pkill 会把几小时的稠密重建打掉。
   stop_colmap_except_dense
-  rm -f "$BACKEND_PID" "$FRONTEND_PID" "$ETA_BACKEND_PID"
+  rm -f "$BACKEND_PID" "$FRONTEND_PID"
   echo "已停止。产物保留在 storage/<job_id>/，重启后用 ./start.sh restart 自动续跑。"
 }
 
@@ -204,11 +190,6 @@ status() {
     echo "前端    : 运行中 (pid $(cat "$FRONTEND_PID"))  http://localhost:5500/video_upload.html"
   else
     echo "前端    : 未运行"
-  fi
-  if alive "$ETA_BACKEND_PID"; then
-    printf 'ETA API : 运行中 (pid %s)  %s\n' "$(cat "$ETA_BACKEND_PID")" "$(curl -fsS http://127.0.0.1:8001/health 2>/dev/null || echo '端口未响应')"
-  else
-    echo "ETA API : 未运行"
   fi
   echo -n "colmap  : "
   local n; n=$(pgrep -cf 'colmap patch_match_stereo')
