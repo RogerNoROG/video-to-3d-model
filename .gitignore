@@ -36,6 +36,11 @@ htmlcov/
 *.sqlite3
 _preview_*.glb
 
+# 唯一的例外：静态展示页（docs/）要发布的模型必须入库 —— GitHub Pages 只能发布
+# 仓库里已有的文件。GitHub 单文件硬上限 100 MB，所以 docs/models/ 只放简并版
+# （见 tools/refinement/export_web_model.py），全量交付物仍留在 storage/ 不入库。
+!docs/models/*.glb
+
 # 拍摄素材：动辄几百 MB 到 GB，且可能含敏感环境信息，绝不进版本库。
 # 任务目录里的 input.* 也属于 storage/；根目录素材同样不应被追踪。
 # 已被 Git 追踪的历史视频需要另行 git rm --cached 后才会真正移出后续提交。
