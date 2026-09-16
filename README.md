@@ -44,6 +44,7 @@ FastAPI 服务 (app/main.py)
 | 配准与融合 | `tools/fusion/merge_models.py`、`merge_two_jobs.py`、`fuse_six_faces.py` | 前者合并同一任务内子模型；后两者处理不同视频/不同扫描。坐标系假设不同，不能互换。|
 | 朝向与数据质检 | `tools/fusion/six_face_pipeline.py`、`tools/diagnostics/project_check.py` | 前者审计近立方体的 24 种姿态、六面深度图和异常支撑面；后者汇总任务状态、ASCII 面深度图和颜色清理。|
 | 网格收尾 | `tools/refinement/finish_mesh.py` | 点云统一 Poisson、可控密度过滤、边界处理、夹盒与基础平滑，输出 GLB。真实孔槽存在时必须用 `--max-hole-edges -1`。|
+| 展示页导出 | `tools/refinement/export_web_model.py` | 对已批准基准做四边形简并，产出 ≤100 MB 的网页版 GLB 供 `docs/` 静态站使用；几何与网格级特征编辑都保留。|
 | 真实数据精修 | `tools/refinement/model_refinement.py`、`repair_cube_edges.py`、`extract_verified_face_repair.py` | 用真实表面证据补强局部区域/棱；受保护外平面平滑；或从补拍中导出经过位置、法线、颜色三重核验的面。均只产生候选。|
 
 删除了已审计为非流形的 `hybrid_face_cleanup.py`，以及会以历史硬编码参数自动补洞、可能误伤真实通道的 `night_pipeline.py`。它们的产物保留在 `storage/` 供审计，但不再提供可误用的执行入口。
@@ -183,6 +184,37 @@ curl -X POST http://127.0.0.1:8000/api/v1/jobs/<job-id>/remesh
 - ICP 与 Poisson 已在原生层多线程，外层同时启动多个重建通常更慢且更容易耗尽内存。
 - 六面候选截图可并行，内存充足时可提高 `six_face_pipeline.py preview --workers`；不要与 Poisson 同时运行。
 - Poisson 深度受点间距与内存共同约束。该项目通常将深度限制在 9；更高深度不会凭空恢复拍摄中不存在的细节，反而会放大错位毛刺。
+
+## GitHub Pages 展示页（`docs/`）
+
+`docs/` 是一份**纯静态展示页**：只做模型浏览与下载，**不依赖任何后端**。
+部署：仓库 **Settings → Pages → Deploy from a branch → Branch `master` + 目录 `/docs` → Save**，
+约 1~2 分钟后上线于 `https://<你的用户名>.github.io/video-to-3d-model/`。
+
+```text
+docs/
+├── index.html                    # 展示页：model-viewer + 模型切换 + X±/Y±/Z± 坐标标记
+├── models.json                   # 模型清单：title / note / models[{name, path, note}]
+├── .nojekyll                     # 跳过 Jekyll，文件原样发布
+└── models/cube-approved-web.glb  # 网页版模型（四边形简并）
+```
+
+- **只发布 `docs/`**：`app/`、`tools/`、`start.sh`、`video_upload.html` 都不受影响，
+  访客也访问不到它们。本地完整 App 与公网展示页互不干扰。
+- **网页版模型是简并版**：GitHub 单文件**硬上限 100 MB**，所以把已批准基准从
+  136 MB 压到 36 MB（150 万三角面），几何形状与「贯穿圆孔保护 + 外平面平滑」
+  这些**网格级编辑都保留**（简并只减面，不重建）：
+  ```bash
+  ./.venv/bin/python tools/refinement/export_web_model.py \
+      --input storage/yellow-cube/six-face-v1/feature-and-plane-v1/merged_six_face_feature_protected_planes.glb \
+      --output docs/models/cube-approved-web.glb --triangles 1500000
+  ```
+  ⚠️ 不要用 Open3D 原生 `write_triangle_mesh` 写 GLB（不合规），本项目统一用 `app/convert.py` 的 `write_glb`。
+- **新增模型**：GLB 放进 `docs/models/`，在 `models.json` 的 `models` 里追加一条，`git push` 后 Pages 自动重新发布。
+- **限额与前提**：单文件 ≤100 MB（超了 push 直接被拒）、站点 ≤1 GB、月流量 100 GB 软上限；
+  仓库需为**公开**（私有仓库的 Pages 需要付费）。
+- **静态站上跑不了的**：上传视频、COLMAP 稠密重建、候选审核、AI 助手 —— 它们都需要本机的
+  Python + CUDA 环境与数小时算力，继续用 `video_upload.html` + `./start.sh start`。
 
 ## API 摘要
 

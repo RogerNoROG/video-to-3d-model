@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>黄色正方体物块 · 三维重建成果</title>
+  <meta name="description" content="黄色正方体物块（带贯穿圆孔与四分之一圆环凹槽）的三维重建成果展示，由 COLMAP + Open3D 离线重建。">
+  <style>
+    :root { color-scheme: light; --ink:#17202b; --muted:#657184; --line:#d6dde5; --surface:#fff; --page:#edf1f4; --accent:#146c94; --ok:#1d6b4a; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--page); color:var(--ink); font:15px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif; }
+    h1,h2,h3,p { margin:0; }
+    a { color:var(--accent); }
+    .shell { max-width:1180px; margin:0 auto; padding:28px 20px 48px; }
+    .topbar { margin-bottom:20px; }
+    .topbar h1 { font-size:24px; font-weight:700; }
+    .topbar .lede { margin-top:8px; max-width:78ch; color:#3d4d5c; }
+    .workbench { display:grid; grid-template-columns:minmax(0,1fr) 340px; gap:16px; align-items:start; }
+    .panel { background:var(--surface); border:1px solid var(--line); border-radius:8px; overflow:hidden; }
+    .viewer-stage { position:relative; height:600px; background:#dfe6ea; }
+    model-viewer { width:100%; height:100%; --poster-color:#dfe6ea; --min-hotspot-opacity:1; }
+    .model-meta { position:absolute; top:14px; left:14px; max-width:min(430px,calc(100% - 28px)); padding:9px 11px; background:rgba(255,255,255,.92); border:1px solid rgba(156,169,181,.8); border-radius:6px; box-shadow:0 1px 3px rgba(19,32,43,.1); }
+    .model-meta strong,.model-meta small { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .model-meta small { margin-top:2px; color:var(--muted); font-size:12px; }
+    /* 坐标标记：位置写进模型自身三维坐标，由 model-viewer 投影到屏幕；透明度按视角调节 */
+    .axis-marker { position:absolute; padding:1px 6px; border:1px solid currentColor; border-radius:999px; background:rgba(255,255,255,.9); font:700 11px/1.5 system-ui,sans-serif; pointer-events:none; box-shadow:0 1px 2px rgba(19,32,43,.18); transition:opacity .16s linear; }
+    .axis-marker.x { color:#c0392b; } .axis-marker.y { color:#1d6b4a; } .axis-marker.z { color:#146c94; }
+    .rail { padding:14px; }
+    .rail h3 { margin-bottom:10px; color:var(--muted); font-size:12px; font-weight:700; letter-spacing:.02em; }
+    .model-list { display:grid; gap:8px; }
+    .model-item { width:100%; padding:10px; text-align:left; color:var(--ink); border:1px solid var(--line); border-radius:6px; background:#fff; cursor:pointer; font:inherit; }
+    .model-item:hover { border-color:#9cc7d8; background:#f2f8fb; }
+    .model-item.active { border-color:var(--accent); box-shadow:inset 3px 0 var(--accent); background:#eef8fc; }
+    .model-item strong,.model-item small { display:block; overflow-wrap:anywhere; }
+    .model-item small { margin-top:3px; color:var(--muted); font-size:12px; }
+    .viewer-actions { display:flex; gap:8px; flex-wrap:wrap; margin-top:12px; }
+    button { border:1px solid var(--line); border-radius:6px; padding:8px 12px; background:#fff; color:var(--ink); font:inherit; cursor:pointer; }
+    button:hover { background:#f5f8fa; }
+    .download-link { display:inline-flex; align-items:center; padding:8px 12px; border:1px solid var(--accent); border-radius:6px; font-weight:650; text-decoration:none; }
+    .note { margin-top:14px; padding:12px 14px; color:#3d4d5c; background:#f5f8fa; border:1px solid var(--line); border-radius:8px; font-size:13px; }
+    .note b { color:var(--ink); }
+    footer { margin-top:18px; color:var(--muted); font-size:13px; }
+    @media (max-width:980px) { .workbench { grid-template-columns:1fr; } .viewer-stage { height:440px; } }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <h1 id="pageTitle">黄色正方体物块 · 三维重建成果</h1>
+      <p class="lede" id="pageNote">正在读取模型清单…</p>
+    </header>
+
+    <div class="workbench">
+      <section class="panel">
+        <div class="viewer-stage">
+          <model-viewer id="viewer" alt="三维模型" camera-controls touch-action="none"
+                        camera-orbit="38deg 68deg 3.4m"
+                        shadow-intensity="1" exposure="1" environment-image="neutral" loading="eager"></model-viewer>
+          <div class="model-meta"><strong id="viewerName">正在载入</strong><small id="viewerNote"></small></div>
+        </div>
+      </section>
+
+      <aside class="panel rail">
+        <h3>模型版本</h3>
+        <div id="modelList" class="model-list"></div>
+        <div class="viewer-actions">
+          <a id="downloadLink" class="download-link" hidden download>下载 GLB</a>
+          <button id="resetCamera" type="button">重置视角</button>
+          <button id="toggleSpin" type="button">自动旋转</button>
+        </div>
+      </aside>
+    </div>
+
+    <div class="note">
+      <b>关于本页</b>：这是一个纯静态展示页，只负责浏览与下载模型。
+      视频上传、COLMAP 稠密重建、候选审核与 AI 助手都需要本机的计算环境（Python + CUDA GPU + 数小时算力），
+      无法在静态托管上运行 —— 它们仍在本机 <code>video_upload.html</code> 中。
+      网页版模型为四边形简并版本，几何形状与特征编辑与全量交付物一致。
+    </div>
+
+    <footer id="pageFooter"></footer>
+  </main>
+
+  <script type="module" src="https://unpkg.com/@google/model-viewer@4.1.0/dist/model-viewer.min.js"></script>
+  <script>
+    const $ = id => document.getElementById(id);
+    const state = { models: [], active: null, spin: false };
+    const AXIS_FACES = [['x', 1, 'X+'], ['x', -1, 'X−'], ['y', 1, 'Y+'], ['y', -1, 'Y−'], ['z', 1, 'Z+'], ['z', -1, 'Z−']];
+    const AXIS_INDEX = { x: 0, y: 1, z: 2 };
+
+    function showModel(entry) {
+      state.active = entry;
+      const viewer = $('viewer');
+      viewer.src = entry.path;
+      $('viewerName').textContent = entry.name || entry.path.split('/').pop();
+      $('viewerNote').textContent = entry.note || '';
+      const link = $('downloadLink');
+      link.href = entry.path; link.download = entry.path.split('/').pop(); link.hidden = false;
+      renderList();
+    }
+    function renderList() {
+      const list = $('modelList'); list.replaceChildren();
+      state.models.forEach(entry => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = `model-item${state.active && state.active.path === entry.path ? ' active' : ''}`;
+        button.innerHTML = '<strong></strong><small></small>';
+        button.querySelector('strong').textContent = entry.name || entry.path;
+        button.querySelector('small').textContent = entry.note || entry.path;
+        button.onclick = () => showModel(entry);
+        list.appendChild(button);
+      });
+    }
+
+    // ---------------- 坐标标记（X± / Y± / Z±）----------------
+    function renderAxisMarkers() {
+      const viewer = $('viewer');
+      if (typeof viewer.getDimensions !== 'function' || typeof viewer.getBoundingBoxCenter !== 'function') return;
+      const size = viewer.getDimensions(); const center = viewer.getBoundingBoxCenter();
+      if (!size || !center) return;
+      for (const node of viewer.querySelectorAll('.axis-marker')) node.remove();
+      AXIS_FACES.forEach(([axis, sign, label]) => {
+        const point = { x: center.x, y: center.y, z: center.z };
+        point[axis] = center[axis] + sign * (size[axis] / 2) * 1.04;
+        const marker = document.createElement('button');
+        marker.type = 'button'; marker.className = `axis-marker ${axis}`;
+        marker.slot = `hotspot-axis-${axis}-${sign > 0 ? 'p' : 'n'}`;   // slot 名不能带 +/- 号
+        marker.dataset.position = `${point.x.toFixed(3)}m ${point.y.toFixed(3)}m ${point.z.toFixed(3)}m`;
+        marker.dataset.axis = axis; marker.dataset.sign = String(sign);
+        marker.textContent = label;
+        viewer.appendChild(marker);
+      });
+      updateAxisMarkerOpacity();
+    }
+    // 面法线与「相机在模型坐标系里的方向」的点积决定亮度：正对 1.00 / 侧视 0.55 / 背对 0.20。
+    // ⚠️ getCameraOrbit() 返回的是**弧度**（实测：要 38deg 给 0.66、要 220deg 给 3.84），直接用。
+    function updateAxisMarkerOpacity() {
+      const viewer = $('viewer');
+      if (typeof viewer.getCameraOrbit !== 'function') return;
+      const orbit = viewer.getCameraOrbit();
+      if (!orbit) return;
+      const theta = orbit.theta, phi = orbit.phi;
+      const direction = [Math.sin(phi) * Math.sin(theta), Math.cos(phi), Math.sin(phi) * Math.cos(theta)];
+      for (const marker of viewer.querySelectorAll('.axis-marker')) {
+        const axis = marker.dataset.axis;
+        if (!(axis in AXIS_INDEX)) continue;
+        const dot = direction[AXIS_INDEX[axis]] * Number(marker.dataset.sign);
+        marker.style.opacity = (dot >= 0 ? 0.55 + 0.45 * dot : 0.55 + 0.35 * dot).toFixed(3);
+        marker.style.zIndex = dot >= 0 ? '2' : '1';
+      }
+    }
+    $('viewer').addEventListener('load', renderAxisMarkers);
+    ['camera-change', 'camera-change-end'].forEach(type =>
+      $('viewer').addEventListener(type, updateAxisMarkerOpacity));
+
+    $('resetCamera').onclick = () => {
+      const viewer = $('viewer');
+      viewer.setAttribute('camera-orbit', '38deg 68deg 3.4m');
+      viewer.setAttribute('camera-target', 'auto');
+      viewer.jumpCameraToGoal();
+    };
+    $('toggleSpin').onclick = () => {
+      state.spin = !state.spin;
+      const viewer = $('viewer');
+      if (state.spin) viewer.setAttribute('auto-rotate', ''); else viewer.removeAttribute('auto-rotate');
+      $('toggleSpin').textContent = state.spin ? '停止旋转' : '自动旋转';
+    };
+
+    (async () => {
+      try {
+        const response = await fetch('models.json', { cache: 'no-cache' });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = await response.json();
+        if (data.title) { document.title = data.title; $('pageTitle').textContent = data.title; }
+        if (data.note) $('pageNote').textContent = data.note;
+        state.models = (data.models || []).filter(entry => entry && entry.path);
+        $('pageFooter').textContent = `${state.models.length} 个模型 · 静态展示页`;
+        if (!state.models.length) throw new Error('模型清单为空');
+        showModel(state.models[0]);
+      } catch (error) {
+        $('pageNote').textContent = `无法读取 models.json：${error.message}`;
+        $('modelList').innerHTML = '<div style="color:var(--muted)">没有可展示的模型</div>';
+      }
+    })();
+  </script>
+</body>
+</html>
