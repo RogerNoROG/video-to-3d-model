@@ -4,115 +4,277 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>黄色正方体物块 · 三维重建成果</title>
-  <meta name="description" content="黄色正方体物块（带贯穿圆孔与四分之一圆环凹槽）的三维重建成果展示，由 COLMAP + Open3D 离线重建。">
+  <meta name="description" content="黄色正方体物块（带贯穿圆孔与四分之一圆环凹槽）的三维重建成果：已批准基准与若干未审核候选，由 COLMAP + Open3D 离线重建。">
   <style>
-    :root { color-scheme: light; --ink:#17202b; --muted:#657184; --line:#d6dde5; --surface:#fff; --page:#edf1f4; --accent:#146c94; --ok:#1d6b4a; }
+    /* 与本地 video_upload.html 保持同一套视觉：变量、面板、行式栅格、模型工作台 */
+    :root { color-scheme:light; --ink:#17202b; --muted:#657184; --line:#d6dde5; --surface:#fff; --page:#edf1f4; --accent:#146c94; --accent-soft:#d9edf5; --ok:#1d6b4a; --warn:#a55d00; --danger:#a32f32; }
     * { box-sizing:border-box; }
-    body { margin:0; background:var(--page); color:var(--ink); font:15px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif; }
-    h1,h2,h3,p { margin:0; }
-    a { color:var(--accent); }
-    .shell { max-width:1180px; margin:0 auto; padding:28px 20px 48px; }
-    .topbar { margin-bottom:20px; }
-    .topbar h1 { font-size:24px; font-weight:700; }
-    .topbar .lede { margin-top:8px; max-width:78ch; color:#3d4d5c; }
-    .workbench { display:grid; grid-template-columns:minmax(0,1fr) 340px; gap:16px; align-items:start; }
-    .panel { background:var(--surface); border:1px solid var(--line); border-radius:8px; overflow:hidden; }
-    .viewer-stage { position:relative; height:600px; background:#dfe6ea; }
-    model-viewer { width:100%; height:100%; --poster-color:#dfe6ea; --min-hotspot-opacity:1; }
-    .model-meta { position:absolute; top:14px; left:14px; max-width:min(430px,calc(100% - 28px)); padding:9px 11px; background:rgba(255,255,255,.92); border:1px solid rgba(156,169,181,.8); border-radius:6px; box-shadow:0 1px 3px rgba(19,32,43,.1); }
-    .model-meta strong,.model-meta small { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-    .model-meta small { margin-top:2px; color:var(--muted); font-size:12px; }
-    /* 坐标标记：位置写进模型自身三维坐标，由 model-viewer 投影到屏幕；透明度按视角调节 */
+    body { margin:0; background:var(--page); color:var(--ink); font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif; }
+    button,select,input,textarea { font:inherit; }
+    button { border:1px solid transparent; border-radius:5px; padding:8px 12px; color:#fff; background:var(--accent); cursor:pointer; }
+    button:hover { background:#0d5879; }
+    button.secondary { color:var(--ink); border-color:var(--line); background:#fff; }
+    button.secondary:hover { background:#f5f8fa; }
+    h1,h2,h3,p { margin:0; } h1 { font-size:21px; font-weight:700; } h2 { font-size:16px; } h3 { font-size:14px; }
+    .shell { max-width:1440px; margin:0 auto; padding:20px; }
+    .topbar { display:flex; align-items:center; justify-content:space-between; gap:18px; margin-bottom:16px; }
+    .banner { margin-bottom:16px; padding:12px 14px; color:#0d5879; background:#eef8fc; border:1px solid #9cc7d8; border-radius:7px; }
+    .banner strong { display:block; margin-bottom:3px; }
+    .row { display:grid; gap:16px; margin-bottom:16px; align-items:start; }
+    .row-primary { grid-template-columns:minmax(0,1fr) minmax(0,1fr); }
+    .row-secondary { grid-template-columns:minmax(0,1fr) 380px; align-items:stretch; }
+    .row-secondary > .panel { display:grid; grid-template-rows:auto minmax(0,1fr); }
+    .row-secondary > .panel > .panel-body { min-height:0; }
+    .panel { background:var(--surface); border:1px solid var(--line); border-radius:7px; overflow:hidden; }
+    .panel-head { min-height:49px; padding:12px 16px; display:flex; justify-content:space-between; align-items:center; gap:12px; border-bottom:1px solid var(--line); }
+    .panel-body { padding:16px; }
+    .project-summary { color:var(--muted); font-size:13px; }
+    .badge { display:inline-flex; align-items:center; padding:2px 8px; border:1px solid var(--line); border-radius:999px; color:var(--muted); background:#eef1f4; font-size:11px; font-weight:700; white-space:nowrap; }
+    .badge.local { color:var(--warn); background:#fff4e2; border-color:#eccb9a; }
+    .status { display:inline-flex; align-items:center; min-height:24px; padding:2px 8px; border-radius:4px; font-size:12px; font-weight:650; white-space:nowrap; }
+    .status.review { color:#874900; background:#fff0d8; } .status.approved { color:var(--ok); background:#def4e8; } .status.demo { color:#0d5879; background:var(--accent-soft); }
+    .project-picker { display:flex; align-items:center; gap:8px; margin-bottom:10px; }
+    .project-picker select { flex:1; min-width:0; height:36px; padding:0 9px; border:1px solid var(--line); border-radius:5px; background:#fff; color:var(--ink); }
+    .project-card-list { display:grid; gap:7px; }
+    .project-card { width:100%; color:var(--ink); text-align:left; background:#fff; border:1px solid var(--line); border-radius:5px; padding:10px; }
+    .project-card.active { border-color:var(--accent); background:#eef8fc; } .project-card small { display:block; color:var(--muted); margin-top:3px; }
+    .upload-grid { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:12px; align-items:center; }
+    .dropzone { min-height:100px; padding:18px; display:flex; align-items:center; justify-content:center; text-align:center; border:2px dashed #99afbd; border-radius:6px; color:var(--muted); cursor:pointer; }
+    .dropzone:hover { border-color:var(--accent); color:var(--accent); }
+    .selected-file { color:var(--muted); font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    input[type=file] { display:none; }
+    .placeholder { margin-top:10px; padding:10px 12px; color:#3d4d5c; background:#fff8e8; border:1px solid #f0dcb0; border-radius:6px; font-size:13px; white-space:pre-wrap; }
+    .placeholder b { color:var(--ink); }
+    .chat-body { display:grid; gap:10px; grid-template-rows:minmax(0,1fr) auto; }
+    .chat-log { display:grid; gap:8px; align-content:start; min-height:96px; overflow-y:auto; padding-right:4px; }
+    .chat-msg { padding:8px 10px; border:1px solid var(--line); border-radius:6px; background:#fff; white-space:pre-wrap; word-break:break-word; }
+    .chat-msg.user { background:#eef8fc; border-color:#9cc7d8; }
+    .chat-msg.demo { background:#fff8e8; border-color:#f0dcb0; }
+    .chat-msg .chat-role { display:block; margin-bottom:3px; color:var(--muted); font-size:11px; font-weight:700; }
+    .chat-form { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:8px; align-items:end; }
+    .chat-form textarea { padding:8px 9px; border:1px solid var(--line); border-radius:5px; resize:vertical; }
+    .task-list { display:grid; gap:7px; }
+    .task { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:center; gap:8px; padding:9px 10px; border:1px solid var(--line); border-radius:5px; background:#fff; }
+    .task-main { min-width:0; } .task-main strong,.task-main small { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; } .task-main small { color:var(--muted); font-size:12px; }
+    .task-controls button { padding:5px 8px; font-size:12px; }
+    .job-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(145px,1fr)); gap:8px; margin-bottom:12px; }
+    .metric { padding:9px; border:1px solid var(--line); border-radius:5px; } .metric small,.metric strong { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; } .metric small { color:var(--muted); } .metric strong { margin-top:2px; }
+    .progress { height:8px; overflow:hidden; border-radius:4px; background:#e0e6ea; } .progress span { display:block; height:100%; width:0; background:var(--accent); }
+    .model-workbench { display:grid; grid-template-columns:minmax(0,1fr) 500px; min-height:560px; }
+    .viewer-stage { position:relative; height:560px; background:#dfe6ea; }
+    model-viewer { width:100%; height:100%; min-height:560px; --poster-color:#dfe6ea; --min-hotspot-opacity:1; }
+    .model-meta { position:absolute; top:14px; left:14px; max-width:min(430px,calc(100% - 28px)); padding:9px 11px; background:rgba(255,255,255,.92); border:1px solid rgba(156,169,181,.8); border-radius:5px; box-shadow:0 1px 3px rgba(19,32,43,.1); }
+    .model-meta strong,.model-meta small { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; } .model-meta small { color:var(--muted); margin-top:2px; }
+    /* 坐标标记：位置写进模型自身三维坐标，由 model-viewer 投影；透明度按视角调节 */
     .axis-marker { position:absolute; padding:1px 6px; border:1px solid currentColor; border-radius:999px; background:rgba(255,255,255,.9); font:700 11px/1.5 system-ui,sans-serif; pointer-events:none; box-shadow:0 1px 2px rgba(19,32,43,.18); transition:opacity .16s linear; }
     .axis-marker.x { color:#c0392b; } .axis-marker.y { color:#1d6b4a; } .axis-marker.z { color:#146c94; }
-    .rail { padding:14px; }
-    .rail h3 { margin-bottom:10px; color:var(--muted); font-size:12px; font-weight:700; letter-spacing:.02em; }
-    .model-list { display:grid; gap:8px; }
-    .model-item { width:100%; padding:10px; text-align:left; color:var(--ink); border:1px solid var(--line); border-radius:6px; background:#fff; cursor:pointer; font:inherit; }
-    .model-item:hover { border-color:#9cc7d8; background:#f2f8fb; }
-    .model-item.active { border-color:var(--accent); box-shadow:inset 3px 0 var(--accent); background:#eef8fc; }
-    .model-item strong,.model-item small { display:block; overflow-wrap:anywhere; }
-    .model-item small { margin-top:3px; color:var(--muted); font-size:12px; }
-    .viewer-actions { display:flex; gap:8px; flex-wrap:wrap; margin-top:12px; }
-    button { border:1px solid var(--line); border-radius:6px; padding:8px 12px; background:#fff; color:var(--ink); font:inherit; cursor:pointer; }
-    button:hover { background:#f5f8fa; }
-    .download-link { display:inline-flex; align-items:center; padding:8px 12px; border:1px solid var(--accent); border-radius:6px; font-weight:650; text-decoration:none; }
-    .note { margin-top:14px; padding:12px 14px; color:#3d4d5c; background:#f5f8fa; border:1px solid var(--line); border-radius:8px; font-size:13px; }
-    .note b { color:var(--ink); }
-    footer { margin-top:18px; color:var(--muted); font-size:13px; }
-    @media (max-width:980px) { .workbench { grid-template-columns:1fr; } .viewer-stage { height:440px; } }
+    .artifact-rail { border-left:1px solid var(--line); background:#f8fafb; padding:12px; overflow-y:auto; overflow-x:hidden; max-height:560px; }
+    .artifact-rail h3 { margin:0 0 9px; color:var(--muted); font-size:12px; font-weight:700; }
+    .artifact-list { display:grid; gap:7px; grid-template-columns:repeat(2,minmax(0,1fr)); }
+    .artifact-item { display:grid; gap:6px; width:100%; padding:10px; text-align:left; color:var(--ink); border:1px solid var(--line); border-radius:5px; background:#fff; }
+    .artifact-item:hover { border-color:#9cc7d8; background:#f2f8fb; }
+    .artifact-item.active { border-color:var(--accent); box-shadow:inset 3px 0 var(--accent); background:#eef8fc; }
+    .artifact-item.approved.pinned { grid-column:1 / -1; border-color:var(--ok); box-shadow:inset 3px 0 var(--ok); background:#f4fbf7; }
+    .artifact-item strong,.artifact-item small { display:block; overflow-wrap:anywhere; } .artifact-item strong { font-weight:650; } .artifact-item small { color:var(--muted); margin-top:3px; font-size:12px; }
+    .artifact-item .tag { display:inline-block; margin-bottom:4px; color:var(--warn); font-size:11px; font-weight:700; } .artifact-item.approved .tag { color:var(--ok); }
+    .artifact-pick { width:100%; padding:0; border:0; background:transparent; color:inherit; font:inherit; text-align:left; cursor:pointer; }
+    .artifact-actions { display:flex; gap:6px; }
+    .artifact-actions button { flex:1; padding:4px 8px; font-size:12px; font-weight:650; border:1px solid var(--line); border-radius:4px; background:#fff; cursor:pointer; }
+    .artifact-actions .approve { color:var(--ok); border-color:var(--ok); }
+    .artifact-actions .revoke { color:var(--warn); border-color:var(--warn); }
+    .viewer-actions { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+    .download-link { color:var(--accent); font-weight:650; text-decoration:none; }
+    .shell-footer { display:flex; align-items:center; gap:12px; margin-top:16px; padding-top:14px; border-top:1px solid var(--line); }
+    .settings-dialog { width:min(540px,92vw); padding:0; border:1px solid var(--line); border-radius:8px; }
+    .settings-dialog::backdrop { background:rgba(23,32,43,.35); }
+    .settings-form { display:grid; gap:12px; padding:18px; }
+    .settings-form label { display:grid; gap:5px; font-size:13px; font-weight:650; }
+    .settings-form input { padding:8px 9px; border:1px solid var(--line); border-radius:5px; font-weight:400; }
+    .settings-actions { display:flex; gap:8px; justify-content:flex-end; }
+    .empty { color:var(--muted); padding:8px 0; }
+    .toast { position:fixed; left:50%; bottom:26px; transform:translateX(-50%); max-width:min(640px,92vw); padding:12px 16px; color:#fff; background:rgba(23,32,43,.94); border-radius:8px; box-shadow:0 6px 20px rgba(19,32,43,.28); font-size:13px; z-index:50; }
+    @media (max-width:960px) { .row-primary,.row-secondary { grid-template-columns:1fr; } .model-workbench { grid-template-columns:1fr; } .artifact-rail { border-left:0; border-top:1px solid var(--line); } .artifact-list { grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); } }
+    @media (max-width:620px) { .shell { padding:12px; } .job-grid { grid-template-columns:1fr; } .viewer-stage { height:420px; } model-viewer { min-height:420px; } }
   </style>
 </head>
 <body>
   <main class="shell">
     <header class="topbar">
-      <h1 id="pageTitle">黄色正方体物块 · 三维重建成果</h1>
-      <p class="lede" id="pageNote">正在读取模型清单…</p>
+      <h1 id="pageTitle">三维重建项目</h1>
+      <span class="badge">只读展示页</span>
     </header>
 
-    <div class="workbench">
+    <div class="banner">
+      <strong>本页是公开的静态展示页</strong>
+      <span id="bannerBody">正在读取模型清单…</span>
+    </div>
+
+    <!-- 第一行：项目（选择 / 新建 / 卡片） 与 导入视频 -->
+    <div class="row row-primary">
       <section class="panel">
-        <div class="viewer-stage">
-          <model-viewer id="viewer" alt="三维模型" camera-controls touch-action="none"
-                        camera-orbit="38deg 68deg 3.4m"
-                        shadow-intensity="1" exposure="1" environment-image="neutral" loading="eager"></model-viewer>
-          <div class="model-meta"><strong id="viewerName">正在载入</strong><small id="viewerNote"></small></div>
+        <div class="panel-head"><h2>项目</h2><span class="project-summary" id="projectSummary"></span></div>
+        <div class="panel-body">
+          <div class="project-picker">
+            <select id="projectSelect" aria-label="选择项目"></select>
+            <button id="createProject" class="secondary" type="button">新建项目</button>
+          </div>
+          <div id="projectCards" class="project-card-list"></div>
         </div>
       </section>
 
-      <aside class="panel rail">
-        <h3>模型版本</h3>
-        <div id="modelList" class="model-list"></div>
+      <section class="panel upload-panel" id="uploadPanel">
+        <div class="panel-head"><h2>导入视频</h2><span class="badge local">需本机环境</span></div>
+        <div class="panel-body">
+          <div class="upload-grid">
+            <label id="dropzone" class="dropzone" for="fileInput">拖放视频到此处，或点击选择</label>
+            <input id="fileInput" type="file" accept="video/mp4,video/quicktime,video/x-msvideo,video/x-matroska,video/webm">
+            <div class="selected-file" id="selectedFile">公开页面不接收文件</div>
+          </div>
+          <div class="placeholder"><b>为什么这里不能上传：</b>上传后要依次跑 COLMAP 特征提取 / 匹配 / 位姿、稠密深度与融合，再用 Open3D 出网格 —— 需要 GPU 与数小时算力，静态托管跑不了。这段素材的重建结果已经作为「模型版本」列在下面。</div>
+        </div>
+      </section>
+    </div>
+
+    <!-- 第二行：AI 助手 与 视频任务 -->
+    <div class="row row-secondary">
+      <section class="panel">
+        <div class="panel-head"><h2>AI 助手</h2><span class="badge local">需本机后端</span></div>
+        <div class="panel-body chat-body">
+          <div id="chatLog" class="chat-log"></div>
+          <form id="chatForm" class="chat-form">
+            <textarea id="chatInput" rows="2" placeholder="问点什么…（公开页面为演示应答）"></textarea>
+            <button id="chatSend" type="submit">发送</button>
+          </form>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head"><h2>视频任务</h2><span class="project-summary" id="taskSummary"></span></div>
+        <div class="panel-body"><div id="taskList" class="task-list"></div></div>
+      </section>
+    </div>
+
+    <!-- 任务进度：点任务的「查看」会填充并展开 -->
+    <section class="panel job-panel" id="jobPanel" hidden>
+      <div class="panel-head"><h2>任务进度</h2><span id="jobStatus" class="status demo">只读快照</span></div>
+      <div class="panel-body">
+        <div class="job-grid">
+          <div class="metric"><small>任务</small><strong id="jobFile">-</strong></div>
+          <div class="metric"><small>阶段</small><strong id="jobStage">-</strong></div>
+          <div class="metric"><small>进度</small><strong id="jobPercent">-</strong></div>
+          <div class="metric"><small>结果</small><strong id="jobResult">-</strong></div>
+        </div>
+        <div class="progress"><span id="progressBar"></span></div>
+        <div class="placeholder" id="jobPlaceholder"></div>
+      </div>
+    </section>
+
+    <!-- 第三行：当前模型展示 与 模型版本 -->
+    <section class="panel">
+      <div class="panel-head">
+        <div><h2 id="modelTitle">当前展示模型</h2><p class="project-summary" id="modelPath">正在读取模型清单</p></div>
+        <span id="modelStatus" class="status review">未审核</span>
+      </div>
+      <div class="model-workbench">
+        <div class="viewer-stage">
+          <model-viewer id="viewer" alt="三维模型" camera-controls touch-action="none"
+                        camera-orbit="38deg 68deg 3.4m" shadow-intensity="1" exposure="1"
+                        environment-image="neutral" loading="eager"></model-viewer>
+          <div class="model-meta"><strong id="viewerName">正在载入</strong><small id="viewerHint"></small></div>
+        </div>
+        <aside class="artifact-rail"><h3>模型版本</h3><div id="artifactList" class="artifact-list"></div></aside>
+      </div>
+      <div class="panel-head">
+        <span class="project-summary" id="modelNote"></span>
         <div class="viewer-actions">
           <a id="downloadLink" class="download-link" hidden download>下载 GLB</a>
-          <button id="resetCamera" type="button">重置视角</button>
-          <button id="toggleSpin" type="button">自动旋转</button>
+          <button id="resetCamera" class="secondary" type="button">重置视角</button>
+          <button id="toggleSpin" class="secondary" type="button">自动旋转</button>
         </div>
-      </aside>
-    </div>
+      </div>
+    </section>
 
-    <div class="note">
-      <b>关于本页</b>：这是一个纯静态展示页，只负责浏览与下载模型。
-      视频上传、COLMAP 稠密重建、候选审核与 AI 助手都需要本机的计算环境（Python + CUDA GPU + 数小时算力），
-      无法在静态托管上运行 —— 它们仍在本机 <code>video_upload.html</code> 中。
-      网页版模型为四边形简并版本，几何形状与特征编辑与全量交付物一致。
-    </div>
-
-    <footer id="pageFooter"></footer>
+    <footer class="shell-footer">
+      <button id="openSettings" class="secondary" type="button">设置</button>
+      <span class="project-summary">配置 AI 助手的 OpenAI 兼容接口（公开页面不生效）</span>
+    </footer>
   </main>
+
+  <dialog id="settingsDialog" class="settings-dialog">
+    <div class="settings-form">
+      <h2>AI 助手设置</h2>
+      <label>接口地址（OpenAI 兼容）<input id="settingsEndpoint" type="url" placeholder="https://api.openai.com/v1"></label>
+      <label>API Key<input id="settingsKey" type="password" placeholder="sk-…"></label>
+      <label>模型名（可选）<input id="settingsModel" type="text" placeholder="gpt-4o-mini"></label>
+      <div class="placeholder"><b>公开页面用不了：</b>助手需要经本机后端转发请求（这样既避开浏览器跨域，密钥也不写进任何页面文件）。在本机运行时填入接口地址与 Key，助手就能读取项目的产物、任务与几何统计来回答。</div>
+      <div class="settings-actions"><button id="settingsSave" type="button">保存</button><button id="settingsClose" class="secondary" type="button">关闭</button></div>
+    </div>
+  </dialog>
+
+  <div id="toast" class="toast" hidden></div>
 
   <script type="module" src="https://unpkg.com/@google/model-viewer@4.1.0/dist/model-viewer.min.js"></script>
   <script>
     const $ = id => document.getElementById(id);
-    const state = { models: [], active: null, spin: false };
+    const state = { data: null, models: [], active: null, spin: false, toastTimer: null };
     const AXIS_FACES = [['x', 1, 'X+'], ['x', -1, 'X−'], ['y', 1, 'Y+'], ['y', -1, 'Y−'], ['z', 1, 'Z+'], ['z', -1, 'Z−']];
     const AXIS_INDEX = { x: 0, y: 1, z: 2 };
 
-    function showModel(entry) {
-      state.active = entry;
-      const viewer = $('viewer');
-      viewer.src = entry.path;
-      $('viewerName').textContent = entry.name || entry.path.split('/').pop();
-      $('viewerNote').textContent = entry.note || '';
-      const link = $('downloadLink');
-      link.href = entry.path; link.download = entry.path.split('/').pop(); link.hidden = false;
-      renderList();
+    function toast(text) {
+      const node = $('toast');
+      node.textContent = text; node.hidden = false;
+      clearTimeout(state.toastTimer);
+      state.toastTimer = setTimeout(() => { node.hidden = true; }, 5200);
     }
-    function renderList() {
-      const list = $('modelList'); list.replaceChildren();
-      state.models.forEach(entry => {
-        const button = document.createElement('button');
-        button.type = 'button';
-        button.className = `model-item${state.active && state.active.path === entry.path ? ' active' : ''}`;
-        button.innerHTML = '<strong></strong><small></small>';
-        button.querySelector('strong').textContent = entry.name || entry.path;
-        button.querySelector('small').textContent = entry.note || entry.path;
-        button.onclick = () => showModel(entry);
-        list.appendChild(button);
-      });
+    const localInfo = () => (state.data && state.data.localOnly) || {};
+    function explainLocal(what) {
+      toast(`${what}：公开页面不提供，需要在本机运行完整应用。${localInfo().body || ''}`);
     }
 
-    // ---------------- 坐标标记（X± / Y± / Z±）----------------
+    // ---------------- 模型展示（本页唯一真正可用的功能） ----------------
+    function artifactCard(entry) {
+      const item = document.createElement('div');
+      item.className = `artifact-item ${entry.approved ? 'approved pinned' : ''}${state.active && state.active.path === entry.path ? ' active' : ''}`;
+      const pick = document.createElement('button');
+      pick.type = 'button'; pick.className = 'artifact-pick';
+      pick.innerHTML = '<span class="tag"></span><strong></strong><small></small>';
+      pick.querySelector('.tag').textContent = entry.approved ? '已批准基准' : '未审核';
+      pick.querySelector('strong').textContent = entry.name;
+      pick.querySelector('small').textContent = entry.note || '';
+      pick.onclick = () => showModel(entry);
+      item.appendChild(pick);
+      const actions = document.createElement('div'); actions.className = 'artifact-actions';
+      const toggle = document.createElement('button');
+      toggle.type = 'button'; toggle.className = entry.approved ? 'revoke' : 'approve';
+      toggle.textContent = entry.approved ? '撤回批准' : '批准为基准';
+      toggle.onclick = () => explainLocal(entry.approved ? '撤回批准' : '批准为基准');
+      actions.appendChild(toggle); item.appendChild(actions);
+      return item;
+    }
+    function renderArtifacts() {
+      const list = $('artifactList'); list.replaceChildren();
+      if (!state.models.length) { list.innerHTML = '<div class="empty">没有可展示的模型</div>'; return; }
+      // 与本地页一致：已批准基准置顶占满一行，其余候选两列
+      state.models.filter(entry => entry.approved).forEach(entry => list.appendChild(artifactCard(entry)));
+      state.models.filter(entry => !entry.approved).forEach(entry => list.appendChild(artifactCard(entry)));
+    }
+    function showModel(entry) {
+      state.active = entry;
+      $('viewer').src = entry.path;
+      $('modelTitle').textContent = entry.approved ? '已批准基准模型' : '候选模型';
+      $('modelPath').textContent = entry.path;
+      $('viewerName').textContent = entry.name;
+      $('viewerHint').textContent = entry.approved ? '已批准的交付基准' : '尚未审核通过，仅作对比';
+      const status = $('modelStatus');
+      status.className = `status ${entry.approved ? 'approved' : 'review'}`;
+      status.textContent = entry.approved ? '已批准' : '未审核';
+      $('modelNote').textContent = entry.note || '';
+      const link = $('downloadLink');
+      link.href = entry.path; link.download = entry.path.split('/').pop(); link.hidden = false;
+      renderArtifacts();
+    }
+
+    // ---------------- 坐标标记（X± / Y± / Z±） ----------------
     function renderAxisMarkers() {
       const viewer = $('viewer');
       if (typeof viewer.getDimensions !== 'function' || typeof viewer.getBoundingBoxCenter !== 'function') return;
@@ -124,7 +286,7 @@
         point[axis] = center[axis] + sign * (size[axis] / 2) * 1.04;
         const marker = document.createElement('button');
         marker.type = 'button'; marker.className = `axis-marker ${axis}`;
-        marker.slot = `hotspot-axis-${axis}-${sign > 0 ? 'p' : 'n'}`;   // slot 名不能带 +/- 号
+        marker.slot = `hotspot-axis-${axis}-${sign > 0 ? 'p' : 'n'}`;
         marker.dataset.position = `${point.x.toFixed(3)}m ${point.y.toFixed(3)}m ${point.z.toFixed(3)}m`;
         marker.dataset.axis = axis; marker.dataset.sign = String(sign);
         marker.textContent = label;
@@ -132,15 +294,14 @@
       });
       updateAxisMarkerOpacity();
     }
-    // 面法线与「相机在模型坐标系里的方向」的点积决定亮度：正对 1.00 / 侧视 0.55 / 背对 0.20。
-    // ⚠️ getCameraOrbit() 返回的是**弧度**（实测：要 38deg 给 0.66、要 220deg 给 3.84），直接用。
+    // ⚠️ getCameraOrbit() 返回弧度（实测：要 38deg 给 0.66、要 220deg 给 3.84），直接用
     function updateAxisMarkerOpacity() {
       const viewer = $('viewer');
       if (typeof viewer.getCameraOrbit !== 'function') return;
       const orbit = viewer.getCameraOrbit();
       if (!orbit) return;
-      const theta = orbit.theta, phi = orbit.phi;
-      const direction = [Math.sin(phi) * Math.sin(theta), Math.cos(phi), Math.sin(phi) * Math.cos(theta)];
+      const direction = [Math.sin(orbit.phi) * Math.sin(orbit.theta), Math.cos(orbit.phi),
+                         Math.sin(orbit.phi) * Math.cos(orbit.theta)];
       for (const marker of viewer.querySelectorAll('.axis-marker')) {
         const axis = marker.dataset.axis;
         if (!(axis in AXIS_INDEX)) continue;
@@ -152,6 +313,41 @@
     $('viewer').addEventListener('load', renderAxisMarkers);
     ['camera-change', 'camera-change-end'].forEach(type =>
       $('viewer').addEventListener(type, updateAxisMarkerOpacity));
+
+    // ---------------- 占位交互：点得动、看得懂 ----------------
+    $('createProject').onclick = () => explainLocal('新建项目');
+    $('dropzone').onclick = event => { event.preventDefault(); explainLocal('导入视频'); };
+    ['dragover', 'dragenter'].forEach(type => $('dropzone').addEventListener(type, event => event.preventDefault()));
+    $('dropzone').addEventListener('drop', event => { event.preventDefault(); explainLocal('导入视频'); });
+    $('fileInput').onchange = () => { $('selectedFile').textContent = '公开页面不接收文件'; explainLocal('导入视频'); };
+
+    function appendChat(role, text, className) {
+      const bubble = document.createElement('div');
+      bubble.className = `chat-msg ${className || role}`;
+      bubble.innerHTML = '<span class="chat-role"></span><span class="chat-text"></span>';
+      bubble.querySelector('.chat-role').textContent = ({ user: '我', assistant: 'AI 助手（演示）' })[role] || role;
+      bubble.querySelector('.chat-text').textContent = text;
+      $('chatLog').appendChild(bubble); $('chatLog').scrollTop = $('chatLog').scrollHeight;
+    }
+    $('chatForm').onsubmit = event => {
+      event.preventDefault();
+      const input = $('chatInput'); const text = input.value.trim();
+      if (!text) return;
+      appendChat('user', text); input.value = '';
+      appendChat('assistant', '这是公开页面，没有后端可以处理问题，所以我只能固定回复。\n\n' +
+        '在本机运行时，助手会先拿到一份项目快照（项目、每个视频任务的状态、全部产物及其批准状态），' +
+        '并能按需调用只读工具去查：list_projects、get_project、inspect_mesh（顶点/三角面/边界边/包围盒）、' +
+        'list_storage、read_storage_json（审计 JSON）—— 工具限制在 storage/ 内且不写任何文件。\n\n' +
+        '例如问「基准模型有多少三角面、边界边里哪些是真实开口」，它就会去读文件再回答。', 'demo');
+      toast('AI 助手：需要本机后端才能真正回答。');
+    };
+    $('chatInput').onkeydown = event => {
+      if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); $('chatForm').requestSubmit(); }
+    };
+
+    $('openSettings').onclick = () => $('settingsDialog').showModal();
+    $('settingsClose').onclick = () => $('settingsDialog').close();
+    $('settingsSave').onclick = () => { $('settingsDialog').close(); explainLocal('保存设置'); };
 
     $('resetCamera').onclick = () => {
       const viewer = $('viewer');
@@ -166,20 +362,67 @@
       $('toggleSpin').textContent = state.spin ? '停止旋转' : '自动旋转';
     };
 
+    // ---------------- 项目 / 视频任务（静态快照，点得动） ----------------
+    function renderProject() {
+      const project = state.data.project || {};
+      const select = $('projectSelect');
+      select.replaceChildren(new Option(project.name || '未命名项目', 'static'));
+      $('projectSummary').textContent = `${project.artifactCount ?? state.models.length} 个模型 · ${(state.data.jobs || []).length} 个视频任务`;
+      const cards = $('projectCards'); cards.replaceChildren();
+      const card = document.createElement('div');
+      card.className = 'project-card active';
+      card.innerHTML = '<strong></strong><small></small>';
+      card.querySelector('strong').textContent = project.name || '未命名项目';
+      card.querySelector('small').textContent = project.description || '';
+      cards.appendChild(card);
+    }
+    function renderTasks() {
+      const jobs = state.data.jobs || [];
+      const list = $('taskList'); list.replaceChildren();
+      $('taskSummary').textContent = jobs.length ? `${jobs.length} 个任务` : '';
+      if (!jobs.length) { list.innerHTML = '<div class="empty">还没有视频任务</div>'; return; }
+      jobs.forEach(job => {
+        const row = document.createElement('div'); row.className = 'task';
+        row.innerHTML = '<div class="task-main"><strong></strong><small></small></div><div class="task-controls"></div>';
+        row.querySelector('strong').textContent = job.filename;
+        row.querySelector('small').textContent = `${job.stage} · ${job.progress}% · ${job.status}`;
+        const preview = document.createElement('button');
+        preview.type = 'button'; preview.className = 'secondary'; preview.textContent = '查看';
+        preview.onclick = () => showJob(job);
+        row.querySelector('.task-controls').appendChild(preview);
+        list.appendChild(row);
+      });
+    }
+    function showJob(job) {
+      $('jobPanel').hidden = false;
+      $('jobFile').textContent = job.filename;
+      $('jobStage').textContent = job.stage;
+      $('jobPercent').textContent = `${job.progress}%`;
+      $('jobResult').textContent = job.status === 'completed' ? '已完成' : job.status;
+      $('progressBar').style.width = `${job.progress}%`;
+      $('jobPlaceholder').innerHTML = `<b>这段素材：</b>${job.note || '—'}\n\n` +
+        '实时进度、分步 ETA 与「续跑 / 重新出网格」都需要本机后端（它每 2 秒采样一次 COLMAP 日志并回写状态）。' +
+        '这里显示的是任务完成后留下的最终快照。';
+      $('jobPanel').scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }
+
     (async () => {
       try {
         const response = await fetch('models.json', { cache: 'no-cache' });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const data = await response.json();
-        if (data.title) { document.title = data.title; $('pageTitle').textContent = data.title; }
-        if (data.note) $('pageNote').textContent = data.note;
+        state.data = data;
+        if (data.title) document.title = data.title;
+        if (data.localOnly && data.localOnly.body) $('bannerBody').textContent = data.localOnly.body;
         state.models = (data.models || []).filter(entry => entry && entry.path);
-        $('pageFooter').textContent = `${state.models.length} 个模型 · 静态展示页`;
+        renderProject(); renderTasks(); renderArtifacts();
+        appendChat('assistant', '这里是演示应答：公开页面没有后端，问题不会真正送给模型。\n' +
+          '本机运行时，助手可以读取项目数据（项目 / 任务 / 产物 / 几何统计 / 审计 JSON）再回答。', 'demo');
         if (!state.models.length) throw new Error('模型清单为空');
-        showModel(state.models[0]);
+        showModel(state.models.find(entry => entry.approved) || state.models[0]);
       } catch (error) {
-        $('pageNote').textContent = `无法读取 models.json：${error.message}`;
-        $('modelList').innerHTML = '<div style="color:var(--muted)">没有可展示的模型</div>';
+        $('bannerBody').textContent = `无法读取 models.json：${error.message}`;
+        $('artifactList').innerHTML = '<div class="empty">没有可展示的模型</div>';
       }
     })();
   </script>
