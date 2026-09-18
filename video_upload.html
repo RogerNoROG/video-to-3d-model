@@ -381,7 +381,19 @@
     ['dragover','dragenter'].forEach(type => $('dropzone').addEventListener(type, event => { event.preventDefault(); $('dropzone').classList.add('active'); }));
     ['dragleave','drop'].forEach(type => $('dropzone').addEventListener(type, event => { event.preventDefault(); $('dropzone').classList.remove('active'); }));
     $('dropzone').addEventListener('drop', event => setFile(event.dataTransfer.files[0])); $('submitVideo').onclick = submitVideo;
-    $('resetCamera').onclick = () => { const viewer = $('modelViewer'); const src = viewer.src; viewer.src = ''; requestAnimationFrame(() => { viewer.src = src; }); };
+    // 重置视角：只把相机属性恢复成 model-viewer 的自动取景值，**绝不动 src**。
+    // 原实现是 `src=''` 再在下一帧设回去，实测点一次就把查看器弄死：场景被卸载后不会
+    // 重新加载 —— loaded 变 false、scene 子节点数归零、30 秒内不再触发 load 事件，
+    // 画面永久空白（就是“卡住”）。而且即使写法能恢复，重设 src 也意味着重新下载并解析
+    // 整个 GLB（已批准基准 136 MB / 560 万三角面），主线程被占住数秒。
+    // cameraOrbit / cameraTarget 会随用户拖动实时更新，所以重置这两个属性即可回到默认
+    // 取景；再调 jumpCameraToGoal() 让它瞬间到位，而不是按 decay 慢慢过渡。
+    $('resetCamera').onclick = () => {
+      const viewer = $('modelViewer');
+      viewer.cameraOrbit = '0deg 75deg 105%';
+      viewer.cameraTarget = 'auto auto auto';
+      if (typeof viewer.jumpCameraToGoal === 'function') viewer.jumpCameraToGoal();
+    };
 
     // ---------------- AI 助手（OpenAI 兼容接口） ----------------
     // Key 只存本机 localStorage；请求经本机后端 /api/v1/assistant/chat 转发，
