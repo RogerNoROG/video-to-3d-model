@@ -51,6 +51,41 @@ FastAPI 服务 (app/main.py)
 
 本轮重构将现存工具脚本从 **17 个减至 14 个**（连同此前已移除的 2 个历史诊断入口，历史入口总数为 19 个）：状态、面特征图、颜色清理已在 `project_check.py` 中统一；真实局部证据与特征保护平滑已在 `model_refinement.py` 中统一。说明文件从 4 份收拢为本 README，历史决策、运行方式和安全边界不再分散维护。
 
+## 环境要求与搭建
+
+### 运行时组件
+
+| 组件 | 实测通过的版本 | 说明 |
+| --- | --- | --- |
+| Ubuntu | 24.04.5（WSL2 亦可） | 换发行版需自行解决 COLMAP 与 CUDA 依赖 |
+| Python | 3.12.3 | venv 内的原生扩展与解释器 ABI 绑定，换大版本必须重建，不能改软链 |
+| COLMAP | 4.3.0.dev0（commit `8b9936c3`，**自编译 CUDA 版**） | 放在 `~/.local/bin/colmap`，或用 `MODEL_API_COLMAP_BINARY` 指定 |
+| FFmpeg | 6.1.1 | 抽帧与视频规格探测 |
+| GPU | RTX 3080 Ti / 驱动 595.97 | ALIKED 走 GPU 需要 cuDNN 9，由 pip 装进 venv |
+
+⚠️ **不能用 `apt install colmap` 代替**：Ubuntu 自带的是 3.9.1 且**不带 CUDA**，既不支持 ALIKED
+（本项目默认特征提取器），参数名前缀也还是旧的 `SiftExtraction.*`，本项目的命令它一条都跑不了。
+
+### 一键搭建
+
+```bash
+./bootstrap.sh              # 建 .venv、按 requirements.lock.txt 安装、逐项校验
+./bootstrap.sh --check      # 只校验现状，不改动任何文件
+./bootstrap.sh --mirror     # 国内网络改用清华 TUNA 镜像
+```
+
+`bootstrap.sh` 依次检查 9 项：Python 版本 → venv（与解释器版本一致性）→ 安装依赖 → **实际
+`import` 各包** → cuDNN 动态库 → **COLMAP 版本 / 是否带 CUDA / 是否支持 ALIKED** → ALIKED 的
+ONNX 权重缓存 → FFmpeg → 项目语法自检。任一项失败会以退出码 1 结束并打印修复命令。
+
+有两个包**必须显式安装**——它们不在任何已声明依赖的传递链上，仅凭 `requirements.txt` 装不到：
+
+- **`scipy`**：`scipy.spatial.cKDTree` 用于顶点上色、点间距测量与点云连通分量清理（`tools/` 下多个脚本）。open3d 不依赖 scipy，缺了会在**运行期**才以 `ModuleNotFoundError` 暴露。
+- **`nvidia-cudnn-cu12`**：ALIKED 的 GPU 推理由 ONNX Runtime 驱动，需要 cuDNN 9。缺了它 colmap 会**直接 abort 而不是回退 CPU**，叠加 `MODEL_API_ALLOW_CPU_FALLBACK=false` 等于完全无法建模。装好后无需设置环境变量：`app/main.py` 的 `cudnn_library_dir()` 会自动探测 venv 内的 `nvidia/cudnn/lib` 并注入子进程的 `LD_LIBRARY_PATH`。
+
+- **`requirements.lock.txt`** 是从实测通过的环境导出的全量锁定（93 条 `==`），换环境时用它；`requirements.txt` 只有 5 条范围约束，作为意图声明保留。
+- **ALIKED 的 ONNX 权重**首次运行会自动联网下载并缓存到 `~/.cache/colmap/`（约 2.9 MB）。目标机断网时后端会**静默回退 SIFT**，重建结果与预期不同——离线环境请从旧机拷贝该目录。
+
 ## 快速开始
 
 ```bash

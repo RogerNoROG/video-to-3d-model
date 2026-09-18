@@ -1,0 +1,137 @@
+# ===========================================================================
+# 全量锁定依赖（video-to-3d-model）
+#
+# 来源：从本项目实测通过的 .venv 导出
+#   环境：Ubuntu 24.04.5 (WSL2) / Python 3.12.3 / x86_64
+#   导出：2026-09-18
+#
+# 与 requirements.txt 的区别：
+#   requirements.txt 只有 5 条宽松范围约束，且**不足以重建可用环境**，原因是
+#   `scipy` 和 `nvidia-cudnn-cu12` 都不在任何已声明依赖的传递链上（open3d 与
+#   fastapi 都不依赖它们），只装 requirements.txt 一定装不到 → 见下方说明。
+#   本文件把实测通过的组合逐条锁死（==），用于换环境时精确复现。
+#
+# 用法：
+#   python3.12 -m venv .venv
+#   ./.venv/bin/python -m pip install -r requirements.lock.txt
+#   # 国内网络建议加速：
+#   ./.venv/bin/python -m pip install -r requirements.lock.txt \
+#       -i https://pypi.tuna.tsinghua.edu.cn/simple
+#
+# 两个容易被漏掉、但缺了就跑不起来的依赖（已显式列在「直接依赖」区）：
+#   1) scipy —— 代码里 scipy.spatial.cKDTree 用于顶点上色、点间距测量、点云连通
+#      分量清理（tools/ 下多个脚本）。open3d 不依赖 scipy，只装 requirements.txt
+#      会以 ModuleNotFoundError 崩在运行期，而不是安装期。
+#   2) nvidia-cudnn-cu12 —— COLMAP 的学习型特征（ALIKED）走 GPU 由 ONNX Runtime
+#      驱动，需要 cuDNN 9。缺了它 colmap 会**直接 abort（不是回退 CPU）**；再叠加
+#      start.sh 里的 MODEL_API_ALLOW_CPU_FALLBACK=false，等于完全无法建模。
+#      装好后无需另设环境变量：app/main.py 的 cudnn_library_dir() 会自动探测
+#      site-packages/nvidia/cudnn/lib 并注入子进程的 LD_LIBRARY_PATH。
+#
+# 注意：pip 与 setuptools 的版本已注释在文件末尾 —— 它们不影响运行期行为，
+#       锁死只会让 pip 自我降级，因此默认不参与安装。
+# ===========================================================================
+
+# --- 直接依赖：代码里 import 的包 + 运行必需的工具 -------------------------
+
+fastapi==0.141.1
+uvicorn==0.52.4
+python-multipart==0.0.32
+pydantic-settings==2.15.0
+open3d==0.19.0
+numpy==2.5.3
+scipy==1.18.1
+nvidia-cudnn-cu12==9.26.0.51
+
+# --- 传递依赖：由上述包连带安装，在此全部锁定 ------------------------------
+
+ConfigArgParse==1.7.7
+Flask==3.1.3
+Jinja2==3.1.6
+MarkupSafe==3.0.3
+PyYAML==6.0.3
+Pygments==2.21.0
+Werkzeug==3.1.8
+addict==2.4.0
+annotated-doc==0.0.5
+annotated-types==0.8.0
+anyio==4.15.1
+asttokens==3.0.2
+attrs==26.1.0
+blinker==1.9.0
+certifi==2026.7.22
+charset-normalizer==3.5.1
+click==8.5.0
+cloudpickle==3.1.2
+comm==0.2.3
+contourpy==1.3.3
+cycler==0.12.1
+dash==4.4.1
+executing==2.2.1
+fastjsonschema==2.22.2
+fonttools==4.65.0
+h11==0.16.0
+httptools==0.8.0
+idna==3.19
+importlib_metadata==9.0.1
+ipython==9.17.1
+ipython_pygments_lexers==1.1.1
+ipywidgets==8.1.9
+itsdangerous==2.2.0
+janus==2.0.0
+jedi==0.20.0
+joblib==1.6.0
+jsonschema==4.26.0
+jsonschema-specifications==2025.9.1
+jupyter_core==5.9.1
+jupyterlab_widgets==3.0.17
+kiwisolver==1.5.1
+matplotlib==3.11.1
+matplotlib-inline==0.2.2
+narwhals==2.26.0
+nbformat==5.11.1
+nest-asyncio==1.6.0
+nvidia-cublas-cu12==12.9.2.10
+nvidia-cuda-nvrtc-cu12==12.9.86
+packaging==26.3
+pandas==3.0.5
+parso==0.8.7
+pexpect==4.9.0
+pillow==12.3.0
+platformdirs==4.11.8
+plotly==7.0.0
+prompt_toolkit==3.0.53
+psutil==7.2.2
+ptyprocess==0.7.0
+pure_eval==0.2.3
+pydantic==2.13.5
+pydantic_core==2.46.5
+pyparsing==3.3.2
+pyquaternion==0.9.9
+python-dateutil==2.9.0.post0
+python-dotenv==1.2.3
+referencing==0.37.0
+requests==2.34.2
+retrying==1.4.2
+rpds-py==2026.6.3
+scikit-learn==1.9.0
+six==1.17.0
+stack-data==0.6.3
+starlette==1.6.0
+threadpoolctl==3.6.0
+tqdm==4.70.0
+traitlets==5.16.1
+typing-inspection==0.4.4
+typing_extensions==4.16.0
+urllib3==2.7.0
+uvloop==0.22.1
+watchfiles==1.2.0
+wcwidth==0.8.3
+websockets==17.1
+widgetsnbextension==4.0.16
+zipp==4.1.0
+
+# --- 工具链版本（仅供参考，不参与安装） ------------------------------------
+# pip==24.0
+# setuptools==84.0.0
+# （wheel 未安装）
