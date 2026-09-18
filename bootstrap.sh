@@ -239,27 +239,41 @@ else
   "$COLMAP_BIN" -h > "$CM_VER_FILE" 2>&1
   CM_VER_LINE="$(head -n 1 "$CM_VER_FILE")"
 
-  if grep -qi 'with CUDA' "$CM_VER_FILE"; then
+  # 先判「能不能加载」再判「支持什么」：缺库时 colmap 连 -h 都跑不了，若落到 CUDA 分支会误报成
+  # 「没有 CUDA」，把人引向完全错误的方向（实测踩过：只拷了 colmap 二进制，漏拷 libonnxruntime.so.1）。
+  CM_OK=1
+  if grep -qi 'error while loading shared libraries' "$CM_VER_FILE"; then
+    bad "colmap 无法加载（缺运行时库）：$CM_VER_LINE"
+    echo "     colmap 的 RUNPATH 是 \$ORIGIN/../lib —— 它只在「与自己同级的 ../lib」里找私有库，"
+    echo "     所以二进制与库必须保持 bin/ 与 lib/ 的兄弟关系。整目录一起拷过去（都进 ~/.local/）："
+    echo "       cp -a <包目录>/external/bin <包目录>/external/lib ~/.local/"
+    echo "     自行编译的 colmap 同理，别只拷 bin/colmap。"
+    CM_OK=0
+  elif grep -qi 'with CUDA' "$CM_VER_FILE"; then
     ok "$CM_VER_LINE"
   else
     bad "$CM_VER_LINE  ← 没有 CUDA，稠密重建会退化到 CPU（本项目实测需数天而非数小时）"
   fi
 
-  "$COLMAP_BIN" feature_extractor -h > "$CM_FE_FILE" 2>&1
-  if grep -qE 'ALIKED_N16ROT' "$CM_FE_FILE"; then
-    ok "支持 ALIKED_N16ROT（本项目默认特征提取器）"
+  if [ "$CM_OK" = 0 ]; then
+    warn "二进制都加载不起来，跳过 ALIKED 与参数前缀判定（否则会被误读成“版本太旧”）"
   else
-    bad "不支持 ALIKED —— 多半是较旧的 COLMAP 或未编入 ONNX 支持"
-    echo "     本项目要求 4.3.0.dev0（commit 8b9936c3，自编译 CUDA 版）。"
-    echo "     Ubuntu 自带的 colmap 是 3.9.1 且无 CUDA，既不认 ALIKED，"
-    echo "     参数名前缀也是旧的 SiftExtraction.*，用不了。"
-  fi
+    "$COLMAP_BIN" feature_extractor -h > "$CM_FE_FILE" 2>&1
+    if grep -qE 'ALIKED_N16ROT' "$CM_FE_FILE"; then
+      ok "支持 ALIKED_N16ROT（本项目默认特征提取器）"
+    else
+      bad "不支持 ALIKED —— 多半是较旧的 COLMAP 或未编入 ONNX 支持"
+      echo "     本项目要求 4.3.0.dev0（commit 8b9936c3，自编译 CUDA 版）。"
+      echo "     Ubuntu 自带的 colmap 是 3.9.1 且无 CUDA，既不认 ALIKED，"
+      echo "     参数名前缀也是旧的 SiftExtraction.*，用不了。"
+    fi
 
-  # 4.3 把 GPU 开关等参数改到了 FeatureExtraction./FeatureMatching. 前缀下
-  if grep -qE '\-\-FeatureExtraction\.' "$CM_FE_FILE"; then
-    ok "参数前缀为 4.3 风格的 --FeatureExtraction.*"
-  else
-    warn "未见 --FeatureExtraction.* 前缀；若为 4.3 之前的版本，app/main.py 里的参数名会不被识别"
+    # 4.3 把 GPU 开关等参数改到了 FeatureExtraction./FeatureMatching. 前缀下
+    if grep -qE '\-\-FeatureExtraction\.' "$CM_FE_FILE"; then
+      ok "参数前缀为 4.3 风格的 --FeatureExtraction.*"
+    else
+      warn "未见 --FeatureExtraction.* 前缀；若为 4.3 之前的版本，app/main.py 里的参数名会不被识别"
+    fi
   fi
 
   if [ -x /usr/bin/colmap ] && [ "$COLMAP_BIN" != "/usr/bin/colmap" ]; then

@@ -138,7 +138,7 @@ fi
 # ---------------------------------------------------------------------------
 # 3. 外部依赖（在项目目录之外，缺了跑不出同样结果）
 # ---------------------------------------------------------------------------
-step "3/6  外部依赖（COLMAP 二进制 + ALIKED ONNX 权重）"
+step "3/6  外部依赖（COLMAP + 运行时库 + ALIKED ONNX 权重）"
 
 COLMAP_SRC="${MODEL_API_COLMAP_BINARY:-}"
 [ -z "$COLMAP_SRC" ] && [ -x "$HOME/.local/bin/colmap" ] && COLMAP_SRC="$HOME/.local/bin/colmap"
@@ -154,14 +154,65 @@ if [ -n "$COLMAP_SRC" ] && [ -x "$COLMAP_SRC" ]; then
   else
     warn "COLMAP 不带 CUDA（$(head -n 1 "$CM_INFO")）—— 目标机无法用 GPU 重建"
   fi
+
+  # 执行文件放 external/bin/、运行时库放 external/lib/。
+  # ★ 这不是随手定的层级：colmap 的 RUNPATH 是 $ORIGIN/../lib，即它只会在
+  #   「与自己同级的 ../lib」里找私有的库 —— 所以两者必须是兄弟目录，解包时也要一起进 ~/.local/。
   if [ "$DRY_RUN" = 0 ]; then
-    mkdir -p "$DEST/external"
-    rsync -aH "$COLMAP_SRC" "$DEST/external/colmap" || die "colmap 复制失败"
-    chmod +x "$DEST/external/colmap"
+    mkdir -p "$DEST/external/bin" "$DEST/external/lib"
+    rsync -aH "$COLMAP_SRC" "$DEST/external/bin/colmap" || die "colmap 复制失败"
+    chmod +x "$DEST/external/bin/colmap"
+    # 迁移：早期版本把二进制平铺成 external/colmap，现已改为 external/bin + external/lib。
+    # 留着旧文件会让人按老说明拷成「只有二进制、没有库」——正是那个踩过的坑，直接清掉。
+    rm -f "$DEST/external/colmap"
   fi
-  ok "→ external/colmap（$(du -h "$COLMAP_SRC" | cut -f1)，来自 $COLMAP_SRC）"
+  ok "→ external/bin/colmap（$(du -h "$COLMAP_SRC" | cut -f1)，来自 $COLMAP_SRC）"
+
+  # ★ 这一步曾漏掉，后果实测过：目标机直接报
+  #   "libonnxruntime.so.1: cannot open shared object file"（退出码 127），colmap 根本起不来。
+  #   注意 onnxruntime 的 CUDA provider 是运行期 dlopen 的，ldd colmap 看不到，必须显式带上。
+  ONNXRT_GLOB=("$HOME/.local/lib/"libonnxruntime*.so*)
+  if [ -e "${ONNXRT_GLOB[0]}" ]; then
+    if [ "$DRY_RUN" = 0 ]; then
+      rsync -aH "${ONNXRT_GLOB[@]}" "$DEST/external/lib/" || die "onnxruntime 库复制失败"
+    fi
+    ok "→ external/lib/ onnxruntime $(du -ch --dereference "${ONNXRT_GLOB[@]}" 2> /dev/null | tail -1 | cut -f1)"
+  else
+    warn "找不到 $HOME/.local/lib/libonnxruntime*.so* —— 目标机会因缺 libonnxruntime.so.1 而完全跑不了 colmap"
+  fi
+
+  # 剩下的是只能靠 ldd 看到的非系统库（libOpenCL / libcurand / libarmadillo 等）。
+  # 用 cp -L：加载器要的是 libOpenCL.so.1 这类名字，而源多半是符号链接。
+  # 刻意排除：libcuda.so.1（NVIDIA 驱动，目标机必须自带）、.venv 里的 cuDNN（由 bootstrap.sh 从 pip 装）、
+  # 以及 glibc 基础库（必须与目标发行版一致）。
+  EXTRA_LIBS=()
+  while IFS= read -r lib; do
+    [ -n "$lib" ] && EXTRA_LIBS+=("$lib")
+  done < <(
+    for f in "$COLMAP_SRC" "$HOME/.local/lib/libonnxruntime_providers_cuda.so"; do
+      [ -f "$f" ] || continue
+      ldd "$f" 2> /dev/null | awk '/=>/ && $3 ~ /^\// {print $3}'
+    done \
+      | grep -vE '^/(lib|usr/lib|lib64)/x86_64-linux-gnu/' \
+      | grep -vE '^/usr/lib/wsl/' \
+      | grep -vE '\.venv/' | sort -u
+  )
+  COPIED_EXTRA=0
+  for lib in "${EXTRA_LIBS[@]:-}"; do
+    [ -n "$lib" ] && [ -f "$lib" ] || continue
+    if [ "$DRY_RUN" = 0 ]; then
+      cp -L "$lib" "$DEST/external/lib/" 2> /dev/null || continue
+    fi
+    COPIED_EXTRA=$((COPIED_EXTRA + 1))
+  done
+  if [ "$COPIED_EXTRA" -gt 0 ]; then
+    ok "→ external/lib/ 另 $COPIED_EXTRA 个非系统库（libOpenCL / libcurand / libarmadillo 等）"
+  else
+    warn "未收集到额外的非系统库；若目标机报缺库，需手动补齐 external/lib/"
+  fi
+  echo "     不带：libcuda.so.1（需目标机 NVIDIA 驱动）、libcudnn.so.9（由 bootstrap.sh 从 pip 装）"
 else
-  warn "本机找不到 colmap，external/colmap 未生成 —— 目标机需自备自编译 CUDA 版"
+  warn "本机找不到 colmap，external/ 未生成 —— 目标机需自备自编译 CUDA 版"
 fi
 
 ONNX_SRC="$HOME/.cache/colmap"
@@ -318,7 +369,7 @@ manifest += [
     "- 差异主要是 `storage/*/dense*/stereo/` 的 238 GB 深度图/法线图，见正文 §3",
     "", "### 目标机上的恢复步骤（详见正文 §4）", "",
     "```bash",
-    "cp external/colmap ~/.local/bin/colmap && chmod +x ~/.local/bin/colmap   # ① 自编译 CUDA 版",
+    "cp -a external/bin external/lib ~/.local/   # ① colmap + 它的运行时库（bin/ 与 lib/ 必须同级）",
     "mkdir -p ~/.cache/colmap && cp external/cache-colmap/*.onnx ~/.cache/colmap/  # ② ALIKED 权重",
     "./bootstrap.sh --mirror      # ③ 重建 venv 并逐项校验",
     "./start.sh start             # ④ 启动 → http://localhost:5500/video_upload.html",
@@ -401,10 +452,20 @@ else
   [ "$VIDEO_BAD" = 0 ] && ok "每个任务的视频/命令行日志/任务元数据大小一致" \
     || PROBLEMS=$((PROBLEMS + VIDEO_BAD))
 
-  if [ -x "$DEST/external/colmap" ]; then
-    ok "external/colmap 可执行"
+  # ★ 真正验证 colmap 能在包内布局下加载：RUNPATH=$ORIGIN/../lib，所以 external/bin 与
+  #   external/lib 的兄弟关系必须成立。缺库时这里会以 127 退出并打印
+  #   "cannot open shared object file" —— 这条校验正是能抓出「只拷了二进制、漏拷库」的守卫。
+  if [ -x "$DEST/external/bin/colmap" ]; then
+    CMV="$WORK/colmap-pkg-check.txt"
+    "$DEST/external/bin/colmap" -h > "$CMV" 2>&1
+    if grep -q 'COLMAP' "$CMV"; then
+      ok "external/bin/colmap 在包内布局下可正常加载：$(head -n 1 "$CMV")"
+    else
+      warn "external/bin/colmap 无法加载（多半缺运行时库）：$(head -n 1 "$CMV")"
+      PROBLEMS=$((PROBLEMS + 1))
+    fi
   else
-    warn "external/colmap 缺失或不可执行"
+    warn "external/bin/colmap 缺失或不可执行"
     PROBLEMS=$((PROBLEMS + 1))
   fi
 
@@ -437,7 +498,7 @@ else
   echo "  体积    : $(du -sh "$DEST" | cut -f1)   （$(find "$DEST" -type f | wc -l) 个文件）"
   echo
   echo "  目标机上的下一步："
-  echo "    1) cp external/colmap ~/.local/bin/colmap && chmod +x ~/.local/bin/colmap"
+  echo "    1) cp -a external/bin external/lib ~/.local/   # colmap 与它的运行时库"
   echo "    2) mkdir -p ~/.cache/colmap && cp external/cache-colmap/*.onnx ~/.cache/colmap/"
   echo "    3) ./bootstrap.sh --mirror"
   echo "    4) ./start.sh start    →  http://localhost:5500/video_upload.html"

@@ -46,12 +46,17 @@
         ├── frames/            抽帧结果（特征提取的真正输入）
         └── pipeline.log       ★ 每阶段执行的完整命令行（参数复现靠它）
 external/
-├── colmap                     ★ 自编译 CUDA 版 COLMAP 4.3.0.dev0
+├── bin/colmap                 ★ 自编译 CUDA 版 COLMAP 4.3.0.dev0
+├── lib/libonnxruntime*.so*    ★ colmap 私有运行时库（否则报 cannot open shared object file）
+├── lib/libOpenCL.so.1 等      ★ 其余非系统库（libcurand / libarmadillo 等）
 └── cache-colmap/*.onnx        ★ ALIKED_N16ROT + bruteforce-matcher 权重
 ```
 
-`external/` 里的东西**不在**项目目录内，所以打包时单独收进来了。它们不合规地缺失会
-导致完全不同的重建结果，见 §4.2。
+`external/` 里的东西**不在**项目目录内，所以打包时单独收进来了。
+
+> ⚠️ **`bin/` 与 `lib/` 必须是兄弟目录，不能拆开摆。** colmap 的 RUNPATH 是 `$ORIGIN/../lib`——
+> 它只会在「与自己同级的 `../lib`」里找私有的库。曾经只拷了二进制、漏掉库，目标机启动即报
+> `libonnxruntime.so.1: cannot open shared object file`（退出码 127），colmap 完全跑不起来。
 
 ---
 
@@ -66,6 +71,7 @@ external/
 | `storage/*/fused.ply` | 3.0 GB | 稠密融合输出 | 必须重跑稠密才能再得到 |
 | `storage/*/merge/`、`storage/yellow-cube/` 的非产物部分 | 21 GB | 只保留了网页登记的那 17 个产物文件 | 无法复现人工配准结论 |
 | `storage/*/dense*/images/` | 1.8 GB | `image_undistorter` 的输出，分钟级重算 | — |
+| `libcuda.so.1`、`.venv` 里的 cuDNN | — | 驱动必须目标机自备；cuDNN 由 pip 重装 | — |
 | `.git/` | 1.2 GB | — | 无提交历史 |
 
 ### ⚠️ 三个必须知道的边界
@@ -100,21 +106,38 @@ cd <本目录>
 这两项不在项目目录里，但缺了会得到**完全不同的重建结果**：
 
 ```bash
-# ① 自编译 CUDA 版 COLMAP（54 MB）
-mkdir -p ~/.local/bin
-cp external/colmap ~/.local/bin/colmap && chmod +x ~/.local/bin/colmap
+# ① colmap 二进制 + 它的运行时库。注意保留 bin/ 与 lib/ 的同级关系（RUNPATH=$ORIGIN/../lib）
+cp -a external/bin external/lib ~/.local/
 
 # ② ALIKED 的 ONNX 权重（2.9 MB）
 mkdir -p ~/.cache/colmap
 cp external/cache-colmap/*.onnx ~/.cache/colmap/
 
-# 验证（应打印 "4.3.0.dev0 ... with CUDA" 且能列出 ALIKED_N16ROT）
+# 验证（应打印 "4.3.0.dev0 ... with CUDA"；若报 cannot open shared object file 就是库没拷全）
 ~/.local/bin/colmap -h
 ```
 
+**包里带了什么、没带什么**（`external/lib/` 共约 510 MB）：
+
+| | 说明 | 体积 |
+| --- | --- | --- |
+| ✅ 带了 | `libonnxruntime.so.1.27.1` + `_providers_cuda.so`（356 MB）+ `_providers_shared.so` | 383 MB |
+| ✅ 带了 | `libOpenCL.so.1`、`libcurand.so.10`、`libarmadillo.so.12` | 127 MB |
+| ❌ 不带 | `libcuda.so.1` —— NVIDIA **驱动**，必须由目标机提供（不能随包发） | — |
+| ❌ 不带 | `libcudnn.so.9` —— 由 `bootstrap.sh` 从 pip 装 `nvidia-cudnn-cu12` | — |
+
 > **不要 `apt install colmap`**：Ubuntu 自带 3.9.1 且不带 CUDA，既不支持 ALIKED，参数名前缀
-> 也还是旧的 `SiftExtraction.*`。若没有这两个文件，`colmap` 会退到 CPU（实测慢 14 倍），
+> 也还是旧的 `SiftExtraction.*`。若 `external/` 缺失，`colmap` 会退到 CPU（实测慢 14 倍），
 > 或因为缺 cuDNN 直接 abort；ONNX 权重缺失且断网时后端会**静默回退 SIFT**，结果差异极大。
+
+**目标机还必须自备**（打包无法覆盖）：
+
+| 依赖 | 为何必须 |
+| --- | --- |
+| NVIDIA 驱动（`libcuda.so.1`） | colmap 的 CUDA 构建与 GPU 推理的根基；实测驱动 595.97 |
+| ffmpeg / ffprobe（系统包） | 抽帧与视频规格探测；`bootstrap.sh` 只检查不安装 |
+| glibc 等基础库 | 与构建机同发行版最稳（实测 Ubuntu 24.04） |
+| CUDA toolkit（可选） | 仅在你要自己重新编译 colmap 时需要；运行时已由上面的库覆盖 |
 
 `start.sh` 已把 `~/.local/bin` 前置到 `PATH`，并默认 `MODEL_API_COLMAP_BINARY=~/.local/bin/colmap`。
 若装到了别处，用环境变量指定即可（`bootstrap.sh` 也认这个变量）。
